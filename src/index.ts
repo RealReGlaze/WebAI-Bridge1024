@@ -143,7 +143,7 @@ async function runInteractive(restArgs: string[]): Promise<void> {
   console.log(`  WebAI Bridge v${VERSION}   后端：${backend.displayName}（${backend.id}）`);
   console.log(`  工作目录：${workspaceRoot}`);
   console.log(`  模式自动切换：模型首轮声明 <mode>ask</mode>（快问快答/3 轮）或 <mode>work</mode>（正式任务/${turns} 轮）`);
-  console.log('  输入任务目标后回车即执行；/tasks 列表 · /show <ID> 详情 · /exit 退出');
+  console.log('  输入任务目标后回车即执行；/tasks 列表 · /show <ID> 详情 · /auto on|off 审批 · /accept-all 全部允许 · /exit 退出');
   console.log(`=========================================================================`);
   if (auto) console.log('  [--yes] 高风险操作自动放行。');
   console.log();
@@ -156,6 +156,39 @@ async function runInteractive(restArgs: string[]): Promise<void> {
     if (line === null) break; // EOF / Ctrl+C
     if (!line) continue;
     if (/^(\/exit|\/quit|exit|quit)$/i.test(line)) break;
+    if (/^\/auto\b/i.test(line)) {
+      const m = /^\/auto\s+(on|off)\s*$/i.exec(line);
+      if (!m) {
+        console.log('用法：/auto on 或 /auto off（自动审批自下一个任务→新开启的对话起生效）');
+        continue;
+      }
+      auto = m[1]!.toLowerCase() === 'on';
+      console.log(`[审批] 自动审批已${auto ? '开启' : '关闭'}（自下一个任务的新对话生效）。`);
+      continue;
+    }
+    if (/^\/accept-all\s*$/i.test(line)) {
+      if (auto) {
+        console.log('[审批] 自动审批已是开启状态（/auto off 可关闭）。');
+        continue;
+      }
+      console.log('[审批] /accept-all 将对本会话所有后续任务自动放行高风险操作（含写文件/执行命令）。');
+      const yn = await readLineOnce('二次确认：真的要全部允许吗？(y/N) ');
+      if (yn && /^\s*y(es)?\s*$/i.test(yn)) {
+        auto = true;
+        console.log('[审批] 已全部允许（仅本次会话；恢复人工确认请输入 /auto off）。');
+      } else {
+        console.log('[审批] 已取消，维持逐项人工确认。');
+      }
+      continue;
+    }
+    if (/^\/help\b/i.test(line)) {
+      console.log('命令：/tasks 任务列表 · /show <ID> [--transcript] 任务详情 · /auto on|off 自动审批 · /accept-all 全部允许（二次确认） · /exit 退出');
+      continue;
+    }
+    if (line.startsWith('/')) {
+      console.log('未知命令（/tasks /show /auto /accept-all /help /exit）');
+      continue;
+    }
     if (/^\/tasks$/i.test(line)) {
       const dir = path.join(ROOT, '.runtime', 'tasks');
       if (!existsSync(dir)) {
@@ -230,6 +263,7 @@ async function main() {
   start -- browser/status/probe 连接、状态、页面结构诊断
   start -- list                 列出本地任务会话（.runtime/tasks）
   start -- show <ID> [--transcript]  查看某任务的轮次/总结/完整成果（嵌套被拦后成果不会失踪）
+  交互模式命令：/tasks · /show · /auto on|off（自动审批开关，自下一个任务新对话生效）· /accept-all（全部允许，需二次确认）· /help · /exit
 启动器：项目 bin/webai.cmd（任意目录调用，如 webai.cmd ci "修复所有测试" -C E:\\proj）
 可用 BACKEND_ID 环境变量指定后端 id；WEBAI_DEBUG=1 输出回复等待诊断。`);
     return;
