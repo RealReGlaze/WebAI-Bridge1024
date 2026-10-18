@@ -23,6 +23,12 @@ import { existsSync, mkdirSync, readdirSync } from 'node:fs';
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const CONFIG_PATH = path.join(ROOT, 'config', 'backends.json');
 
+/** 用户打开命令行时的目录（webai.cmd 在 pushd 项目根前捕获并传入）。默认工作区以此为准。 */
+const INVOKED_CWD =
+  process.env['WEBAI_INVOKED_CWD'] && path.isAbsolute(process.env['WEBAI_INVOKED_CWD'])
+    ? process.env['WEBAI_INVOKED_CWD']
+    : process.cwd();
+
 interface ConfigFile {
   defaults: {
     waitForResponse: { totalTimeoutMs: number; stablePolls: number; pollIntervalMs: number };
@@ -110,16 +116,16 @@ async function executeTask(
 
 /** 无参交互模式：版本横幅 + >> 引导输入。工作目录 = 启动时的当前目录；ask/work 模式由模型自声明、轮数预算自动切换。 */
 async function runInteractive(restArgs: string[]): Promise<void> {
-  // 启动旗标：[-t 轮数] [--yes] [--debug] [-C 目录]
+  // 启动旗标：[-t 轮数] [--yes] [--debug] [-C 目录]（-C 相对路径基于用户命令行目录）
   let turns = 20;
   let auto = false;
-  let workspaceRoot = process.cwd();
+  let workspaceRoot = INVOKED_CWD;
   for (let i = 0; i < restArgs.length; i++) {
     const a = restArgs[i]!;
     if (a === '--yes') auto = true;
     else if (a === '--debug') process.env['WEBAI_DEBUG'] = '1';
     else if (a === '-t' || a === '--turns' || a === '--max') turns = Math.min(Math.max(Number(restArgs[++i] ?? 20) || 20, 1), 50);
-    else if (a === '-C' || a === '--dir') workspaceRoot = path.resolve(process.cwd(), restArgs[++i] ?? '.');
+    else if (a === '-C' || a === '--dir') workspaceRoot = path.resolve(INVOKED_CWD, restArgs[++i] ?? '.');
     else if (a) {
       console.error(`[interactive] 无法识别的参数：${a}（交互模式不带任务目标文本，goals 请用 ci 命令）`);
       process.exitCode = 1;
@@ -446,12 +452,12 @@ async function main() {
         process.exitCode = 1;
         return;
       }
-      // 工作区：ci 默认当前进程目录（同 Claude Code 在目标目录里运行）；agent 保持旧默认
+      // 工作区：默认用户命令行所在目录（同 Claude Code 在目标目录里运行）；agent 保持旧默认
       const dirValue = typeof flags['dir'] === 'string' ? flags['dir'] : '';
       const workspaceRoot = dirValue
-        ? path.resolve(process.cwd(), dirValue)
+        ? path.resolve(INVOKED_CWD, dirValue)
         : ci
-          ? process.cwd()
+          ? INVOKED_CWD
           : path.resolve(ROOT, 'sandbox-tasks', 'current');
       if (!existsSync(workspaceRoot)) {
         mkdirSync(workspaceRoot, { recursive: true });
