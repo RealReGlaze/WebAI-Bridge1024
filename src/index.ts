@@ -80,6 +80,14 @@ function appendDigest(store: ContextStore, workspaceRoot: string, entry: Context
   saveContextStore(store);
 }
 
+/** 审批模型 = 第一个「非当前执行方」的已启用后端（auto/accept-all 放行时由它 Allow/Refuse，遵守 /wait 节流） */
+function buildApprover(currentId: string, cfgFile: { backends: BackendConfig[] }): { adapter: IModelAdapter; label: string } | undefined {
+  const other = cfgFile.backends.find(
+    (b) => (b as BackendConfig & { enabled?: boolean }).enabled !== false && b.id !== currentId,
+  );
+  return other ? { adapter: createAdapter(other), label: other.displayName } : undefined;
+}
+
 function loadConfig(): ConfigFile {
   return JSON.parse(readFileSync(CONFIG_PATH, 'utf-8')) as ConfigFile;
 }
@@ -130,12 +138,17 @@ async function executeTask(
     contextDigest?: string;
     pacingMs?: number;
     deepThink?: boolean;
+    approver?: { adapter: IModelAdapter; label: string };
   },
 ): Promise<{ ok: boolean; session: AgentSessionState | null }> {
   const conn = await adapter.connect();
   if (!conn.ok) {
     console.error(`[ci] 连接失败：${conn.code} ${conn.message}`);
     return { ok: false, session: null };
+  }
+  if (params.autoApprove) {
+    if (params.approver) console.log(`[审批] 执行方 ${params.backendName ?? adapter.backendId}；审批模型：${params.approver.label}（自动放行时逐次请求其 Allow/Refuse，遵守 /wait 节流）`);
+    else console.log('[审批] 无第二个可用后端作为审批模型：自动放行将直接生效。');
   }
   const loop = new AgentLoop(adapter, {
     goal: params.resumeSession ? params.resumeSession.goal : params.goal,
@@ -146,6 +159,7 @@ async function executeTask(
     contextDigest: params.contextDigest,
     pacingMs: params.pacingMs,
     deepThink: params.deepThink,
+    approver: params.approver,
     waitFor: {
       baselineAssistantCount: 0,
       totalTimeoutMs: wf.totalTimeoutMs,
@@ -340,6 +354,7 @@ async function runInteractive(restArgs: string[]): Promise<void> {
           resumeSession: target,
           pacingMs: waitSec * 1000,
           deepThink: deepMap[backend2.id],
+          approver: buildApprover(backend2.id, cfgFile),
         });
       } catch (e) {
         console.error('[continue] 任务执行异常：', e);
@@ -395,6 +410,7 @@ async function runInteractive(restArgs: string[]): Promise<void> {
         contextDigest: digestForWorkspace(contextStore, workspaceRoot),
         pacingMs: waitSec * 1000,
         deepThink: deepMap[backendForTask.id],
+        approver: buildApprover(backendForTask.id, cfgFile),
       });
       // 任务结束后滚动累积前情摘要（跨对话/跨模型接力；最多保留最近 3 条）
       if (result.session) {
@@ -750,6 +766,7 @@ async function main() {
         contextDigest: noCtx ? undefined : digestForWorkspace(loadContextStore(), workspaceRoot),
         pacingMs: waitFlag * 1000,
         deepThink: deepFlag,
+        approver: buildApprover(backend.id, cfgFile),
       });
       // ci 也滚动累积前情摘要（除非 --no-ctx）
       if (!noCtx && result.session) {

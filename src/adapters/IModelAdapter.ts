@@ -90,6 +90,8 @@ export interface WaitForResponseOptions {
   totalTimeoutMs: number;
   /** 回复文本需要连续稳定 N 次轮询才判定完成 */
   stablePolls: number;
+  /** 额外要求答复文本保持稳定的最短毫秒数（防"长思考中的短暂停顿"被误判为完成；0/省略=不要求） */
+  minStableMs?: number;
   pollIntervalMs: number;
   /** 命中这些关键词时按“被网页拒绝/受限”处理（适配器可自行补充） */
   rejectPatterns?: string[];
@@ -159,6 +161,11 @@ export abstract class IModelAdapter {
 
   /** 已捕获的网络响应条数（可选能力；默认 0，表示无网络通道） */
   async captureNetBaseline(): Promise<number> {
+    return 0;
+  }
+
+  /** 发送前的助手消息计数快照（可选能力；默认 0 —— DOM 回退通道仅用于识别"新增"回复） */
+  async snapshotBaseline(): Promise<number> {
     return 0;
   }
 

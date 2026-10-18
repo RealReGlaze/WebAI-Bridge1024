@@ -311,27 +311,47 @@ export class DeepSeekWebAdapter extends IModelAdapter {
     }
   }
 
-  /** 深度思考（R1）开关：定位输入区「深度思考」开关元素并点击。
-   *  页面没有 aria/state API，采用「点击+尽力自检」：点击前若元素可见即切换；
-   *  返回是否找到并点击了开关。状态一致性以页面实际为准（后续实测校准选择器）。 */
+  /**
+   * 深度思考（R1）开关：状态化设置（先读后点，避免盲点击反复翻转）。
+   * 2026-10-18 标定（scripts/calib-toggle5，真实 Edge 实测）：
+   *  - 开关元素：div.ds-toggle-button（BEM 稳定类名）且内含文本「深度思考」；
+   *  - 状态：元素计算文字色 —— 开 = rgb(57, 100, 254)（蓝），关 = rgb(15, 17, 21)（近黑）；
+   *  - 点击该元素本身完成切换；点击后再读一次颜色确认生效。
+   */
   override async setDeepThink(enabled: boolean): Promise<boolean> {
     if (!this.page) return false;
-    const btn = this.page
-      .locator(`text=深度思考`)
-      .first();
-    const vis = await btn.isVisible().catch(() => false);
-    if (!vis) return false;
-    try {
-      await btn.click({ timeout: 5000 });
-      console.log(`[deepseek] 深度思考开关已提交：${enabled ? '开' : '关'}（页面实际状态以其 UI 为准）。`);
+    const readState = async (): Promise<boolean | null> =>
+      this.page!.evaluate(`(() => {
+        const tb = [...document.querySelectorAll('div.ds-toggle-button')].find(el => (el.textContent || '').includes('深度思考'));
+        if (!tb) return null;
+        return getComputedStyle(tb).color;
+      })()`).then((c) => (typeof c === 'string' ? !/15,\s*17,\s*21/.test(c) : null));
+    const before = await readState().catch(() => null);
+    if (before !== null && before === enabled) {
+      console.log(`[deepseek] 深度思考已是目标状态（${enabled ? '开' : '关'}），无需切换。`);
       return true;
+    }
+    try {
+      const btn = this.page.locator('div.ds-toggle-button:has-text("深度思考")').first();
+      if (!(await btn.isVisible().catch(() => false))) return false;
+      await btn.click({ timeout: 5000 });
+      const after = await readState().catch(() => null);
+      if (after === null) {
+        // 点击后读不回状态：报告已提交，实际生效与否由后续对话自行暴露
+        console.log(`[deepseek] 已点击深度思考开关：${enabled ? '开' : '关'}（无法读回验证）。`);
+        return true;
+      }
+      const ok = after === enabled;
+      console.log(`[deepseek] 深度思考 -> ${after ? '开' : '关'}（目标 ${enabled ? '开' : '关'}）${ok ? '✓ 已生效' : '⚠ 切换未生效'}。`);
+      return ok;
     } catch {
       return false;
     }
   }
 
   /** 诊断：dump 页面上候选选择器的命中情况，页面改版时校准用 */
-  async probe(): Promise<Record<string, unknown>> {    if (!this.page) throw new Error('未连接');
+  async probe(): Promise<Record<string, unknown>> {
+    if (!this.page) throw new Error('未连接');
     const out: Record<string, unknown> = { url: this.page.url() };
     const items: Array<{ selector: string; count: number }> = [];
     const add = (sel: string) => items.push({ selector: sel, count: 0 });
@@ -448,6 +468,9 @@ export class DeepSeekWebAdapter extends IModelAdapter {
     let lastText = '';
     let sawNewByCount = false;
     let sawNewByFp = false;
+    // 最短稳定窗（毫秒）：防长思考中的微停顿被误判为完成
+    const minStableMs = opts.minStableMs ?? 0;
+    let stableSince = 0;
     const debug = process.env['WEBAI_DEBUG'] === '1';
     while (Date.now() < domDeadline) {
       const { count, lastText: txt } = await this.readAssistant();
@@ -525,13 +548,17 @@ export class DeepSeekWebAdapter extends IModelAdapter {
         if (candidate && candidate === lastText) {
           stable += 1;
           if (stable >= opts.stablePolls) {
-            this.lastReceivedAt = Date.now();
-            this.connectionState = 'connected';
-            this.lastError = null;
-            return { ok: true, value: { text: candidate, complete: true } };
+            if (stableSince === 0) stableSince = Date.now();
+            if (minStableMs === 0 || Date.now() - stableSince >= minStableMs) {
+              this.lastReceivedAt = Date.now();
+              this.connectionState = 'connected';
+              this.lastError = null;
+              return { ok: true, value: { text: candidate, complete: true } };
+            }
           }
         } else {
           stable = 0;
+          stableSince = 0;
         }
       }
       lastText = candidate;

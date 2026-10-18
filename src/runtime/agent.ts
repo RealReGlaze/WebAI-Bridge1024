@@ -34,8 +34,10 @@ export interface AgentLoopOptions {
   contextDigest?: string;
   /** 轮间节流（防风控）：每轮发送前等待的毫秒数（/wait <seconds> 设置） */
   pacingMs?: number;
-  /** 深度思考开关：connect 后立刻设置（undefined = 不动网页上的开关） */
+  /** 深度思考开关：connect 后立刻设置（undefined = 不动网页上的开关）；开启时思考更久，轮次时限自动放大 */
   deepThink?: boolean;
+  /** 审批模型：--yes/auto 放行时由「另一个模型」审批允许/拒绝（例：mimo 推理时由 deepseek 审批） */
+  approver?: { adapter: IModelAdapter; label: string };
 }
 
 export interface AgentRoundLog {
@@ -114,20 +116,86 @@ export class AgentLoop {
     writeFileSync(path.join(dir, `${this.session.sessionId}.json`), JSON.stringify(this.session, null, 2), 'utf-8');
   }
 
-  /** 高风险操作确认：CLI 人工 y/n，或 --yes 自动放行 */
+  /** 审批模型是否不可用（连接失败等，回退为直接放行；进程内记忆避免反复重试） */
+  private approverUnavailable = false;
+
+  /** 深度思考开关是否成功置于开启（成功后轮次等待时限 ×3） */
+  private deepThinkApplied = false;
+
+  /** 高风险操作确认：CLI 人工 y/n，或自动放行（有审批模型时交给它 Allow/Refuse） */
   private makeToolContext(): ToolContext {
     return {
       workspaceRoot: this.options.workspaceRoot,
       policy: this.policy,
       confirm: async (title: string) => {
         if (this.options.autoApprove) {
-          console.log(`[agent] 自动放行（--yes）：${title}`);
-          return true;
+          return this.approve(title);
         }
         const answer = await confirmPrompt(`[确认] ${title}? (y/N) `);
         return answer;
       },
     };
+  }
+
+  /** 自动放行：优先交由审批模型（Allow/Refuse），不可用或无审批模型时直接放行 */
+  private async approve(title: string): Promise<boolean> {
+    const ap = this.options.approver;
+    if (!ap || this.approverUnavailable) {
+      console.log(`[agent] 自动放行${ap && this.approverUnavailable ? '（审批模型不可用，回退直接放行）' : '（无审批模型）'}：${title}`);
+      return true;
+    }
+    const verdict = await this.modelApproval(ap, title);
+    if (verdict === null) {
+      this.approverUnavailable = true;
+      console.log(`[agent] 审批模型不可用：回退为直接放行（${title}）`);
+      return true;
+    }
+    return verdict;
+  }
+
+  /** 调用审批模型：发送任务背景+操作摘要，要求第一行 Allow/Refuse、第二行理由。遵守 /wait 节流。 */
+  private async modelApproval(ap: { adapter: IModelAdapter; label: string }, title: string): Promise<boolean | null> {
+    // 节流遵循 /wait 设置（审批对话与任务轮次共用）
+    if (this.options.pacingMs && this.options.pacingMs > 0) {
+      await new Promise((r) => setTimeout(r, this.options.pacingMs));
+    }
+    const conn = await ap.adapter.connect();
+    if (!conn.ok) return null;
+    const recent = this.session.rounds.slice(-2).flatMap((r) => r.calls);
+    const recentText = recent.length
+      ? recent.map((c) => `${c.name}${c.ok ? '✓' : '✗'}`).join('、')
+      : '（本轮首批操作）';
+    const msg = [
+      '你是本地 Agent 系统的安全审批员，下一行是执行方模型请求批准的操作。审批依据：操作是否违反本地安全规则（越出工作区、删除性破坏、不可逆系统变更、明显与任务无关），以及是否有正当理由。',
+      '',
+      `【任务背景】${(this.options.goal ?? '').replace(/\s+/g, ' ').slice(0, 200)}`,
+      `【最近已执行】${recentText}`,
+      `【本次待批操作】${title}`,
+      '',
+      '回复格式要求：第一行只写 Allow（允许）或 Refuse（拒绝）；第二行写一句理由（不超过 40 字）。不要输出其他内容。',
+    ].join('\n');
+    const sent = await ap.adapter.sendMessage(msg);
+    if (!sent.ok) return null;
+    const baseline = await ap.adapter.snapshotBaseline().catch(() => 0);
+    const nb = (await ap.adapter.captureNetBaseline().catch(() => -1)) ?? -1;
+    const wait = await ap.adapter.waitForResponse({
+      baselineAssistantCount: baseline,
+      netBaseline: nb,
+      totalTimeoutMs: 90_000,
+      stablePolls: 3,
+      pollIntervalMs: 800,
+    });
+    const raw = wait.ok ? wait.value.text : `（审批模型 ${wait.code}：${wait.message}）`;
+    const firstLine = raw.trim().split(/\r?\n/, 1)[0]!.replace(/^[#>*\s-]+/, '').replace(/\*+/g, '').trim();
+    const allow = /^(allow|允许|同意|approve)\b/i.test(firstLine);
+    const refuse = /^(refuse|拒绝|deny|否)\b/i.test(firstLine);
+    const reason = raw.trim().split(/\r?\n/).slice(1).join(' ').replace(/\s+/g, ' ').trim().slice(0, 60) || '（未给出理由）';
+    if (!allow && !refuse) {
+      console.log(`[审批] ${ap.label}：输出无法解析（首行「${firstLine.slice(0, 30)}」），按拒绝处理。`);
+      return false;
+    }
+    console.log(`[审批] ${ap.label} → ${allow ? 'Allow（允许）' : 'Refuse（拒绝）'}｜理由：${reason}`);
+    return allow;
   }
 
   private async runToolCalls(calls: Array<{ name: string; args: Record<string, unknown> }>): Promise<Array<{ name: string; result: ToolOutput }>> {
@@ -188,6 +256,7 @@ export class AgentLoop {
     }
     if (options.deepThink !== undefined) {
       const toggled = await this.adapter.setDeepThink(options.deepThink);
+      this.deepThinkApplied = toggled && options.deepThink === true;
       if (!toggled) console.log(`[agent] 后端 ${this.adapter.backendId} 未提供深度思考开关（跳过）。`);
     }
     // 每次运行都从新网页会话开始（续跑的新上下文由第一条消息重建，避免残留干扰）
@@ -246,8 +315,12 @@ export class AgentLoop {
         this.saveSession();
         return this.session;
       }
+      // 深度思考轮次：思考链可能远超普通回复，等待时限自动放大（防「长思考时提前收卷」）
+      const deepFactor = options.deepThink === true && this.deepThinkApplied ? 3 : 1;
       const reply = await this.adapter.waitForResponse({
         ...options.waitFor,
+        totalTimeoutMs: Math.round(options.waitFor.totalTimeoutMs * deepFactor),
+        minStableMs: this.deepThinkApplied ? 3000 : undefined,
         baselineAssistantCount: snap,
         baselineChatFp: chatFp,
         netBaseline,

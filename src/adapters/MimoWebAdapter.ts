@@ -267,6 +267,9 @@ export class MimoWebAdapter extends IModelAdapter {
     let stable = 0;
     let lastCandidate = '';
     let sawNew = false;
+    // 最短稳定窗（毫秒）：防长思考中的微停顿被误判为完成
+    const minStableMs = opts.minStableMs ?? 0;
+    let stableSince = 0;
     const baselineFp = opts.baselineChatFp ?? '';
     while (Date.now() < deadline) {
       const fp = await this.containerText();
@@ -301,13 +304,17 @@ export class MimoWebAdapter extends IModelAdapter {
         if (candidate === lastCandidate) {
           stable += 1;
           if (stable >= opts.stablePolls && candidate.trim()) {
-            this.lastReceivedAt = Date.now();
-            this.connectionState = 'connected';
-            this.lastError = null;
-            return { ok: true, value: { text: candidate, complete: true, thinking: await this.readThinking() } };
+            if (stableSince === 0) stableSince = Date.now();
+            if (minStableMs === 0 || Date.now() - stableSince >= minStableMs) {
+              this.lastReceivedAt = Date.now();
+              this.connectionState = 'connected';
+              this.lastError = null;
+              return { ok: true, value: { text: candidate, complete: true, thinking: await this.readThinking() } };
+            }
           }
         } else {
           stable = 0;
+          stableSince = 0;
         }
       }
       lastCandidate = candidate;

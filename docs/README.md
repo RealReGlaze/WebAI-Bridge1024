@@ -37,7 +37,15 @@ webai.cmd --yes -t 20            # 高风险自动放行；轮数预算 20
 - `webai.cmd --backend mimo`（或 `/switch mimo`）切换模型后端；`/switch` 不带参数列出全部可用后端。`ci` 同样支持 `webai.cmd ci ... --backend mimo`。
 - 已完成后端：DeepSeek（`deepseek`，已验证）、小米 MiMo（`mimo`，`aistudio.xiaomimimo.com/#/c`，**首次使用需在专用 Edge 窗口手动登录小米账号**，profile 独立 `.runtime/edge-profile-mimo`）。
 - **跨模型交接**：任务停留在 `--resume <ID> --backend <新后端>`（交互模式 `/switch` 后 `/continue`）即可由新模型接手——接手消息包含原后端署名、全部已执行轮次、每轮工具结果与**原模型思考过程摘录**，工具结果都来自本地真实执行，浏览器端会话丢失不影响上下文。同一任务可在 deepseek ↔ mimo 间反复交接。
+- **深度思考（R1）开关已状态化**：先读页面开关状态（`div.ds-toggle-button` 文字颜色：蓝=开/灰=关，2026-10-18 实测标定）再决定是否点击，点击后读回验证；重复 `/deep-on` 不会错翻。开启时每轮等待时限 ×3，且 DOM 通道增加 3s 最短稳定窗——**长思考不再提前收卷**（`response/status FINISHED` 的网络通道语义已经真实流验证为"仅真实结束时出现"）。
 - MiMo 选择器按未登录态校准（输入框=textarea、登录指示=未登录/立即登录）；登录后如页面结构变化，用 `start -- probe --backend mimo` 诊断，并在 `config/backends.json` 的 `selectors` 里覆盖。
+
+**模型互审批（自动放行的审批升级）**：
+
+- `/auto on`、`/accept-all`、`--yes` 的高风险放行改为**交给另一模型审批**：审批模型 = 第一个「非当前执行方」的已启用后端（例：mimo 推理 → deepseek 审批）。
+- 审批消息包含：任务背景（目标）、最近已执行步骤、本次待批操作；要求**第一行只写 Allow/Refuse、第二行一句理由**；CLI 显示 `[审批] <审批模型> → Allow（允许）｜理由：<reason>`。
+- 遵守 `/wait`（节流同样作用于审批对话）与 `/deep-on`（审批回复等待时限亦放大），审批输出无法解析时**按拒绝处理**（fail-closed）；执行方被拒的操作会收到"未获批准"反馈并可说明理由重试。
+- 审批模型连接失败（未登录等）自动回退为直接放行并提示，同一进程内不再反复重试。
 
 **隐蔽调用协议（首选）**：
 
