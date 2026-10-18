@@ -14,22 +14,28 @@ Windows 本地系统：用您已正常登录的网页 AI（DeepSeek / 千问等�
 
 ## 使用
 
+**启动器（推荐，任意目录可用）**：项目自带 `bin/webai.cmd`，等价于在项目根运行 CLI：
+
 ```powershell
-npm.cmd start                                        # 帮助
-npm.cmd start -- browser                             # 启动/复用专用 Edge，附加 DeepSeek
-npm.cmd start -- probe                               # 页面结构诊断（改版/改选择器时用）
-npm.cmd start -- state                               # 网页端会话状态（URL/会话 id/消息数）
-npm.cmd start -- chat "写一个 helloworld.ts"          # 发送并等待回复
-npm.cmd start -- new                                 # 新建网页会话
-npm.cmd start -- status                              # 后端连接状态
-npm.cmd start -- list                                # 列出本地任务状态（.runtime/tasks）
-npm.cmd start -- agent "任务目标" --dir sandbox-tasks/current --max 12 --yes
-                                                     # 自动迭代闭环（模型提请求，本地执行并反馈）
-npx.cmd tsx scripts/smoke.ts                         # 本地冒烟测试（21 项，不依赖网页）
+# Claude Code 风格一键任务：默认在【当前目录】工作，完成=退出码 0
+E:\...\WebAPI\bin\webai.cmd ci "修复所有失败的测试"                 # -t 20 --yes 可选
+E:\...\WebAPI\bin\webai.cmd ci "实现XX功能" -C E:\proj\myapp       # 指定工作区
+E:\...\WebAPI\bin\webai.cmd ci --continue                          # 恢复同工作区最近未完成任务
+E:\...\WebAPI\bin\webai.cmd ci --resume tmvdbnhod                  # 恢复指定任务（webai start -- list 查看 ID）
 ```
 
-- `--yes`：高风险操作自动放行；不带时写文件/高风险命令会逐项人工 y/n 确认。
-- `WEBAI_DEBUG=1` 环境变量：等待回复期间输出轮询诊断日志（检测通道状态）。
+`ci` 详细参数：`-t/--max-turns N` 本轮最大轮数（默认 15）；`--yes` 高风险操作自动放行（不带则逐项 y/n 人工确认）；`--debug` 输出回复等待诊断。
+
+无需启动器时也可从项目根运行（Windows npm 需用 npm.cmd）：
+
+```powershell
+cd E:\All\创作类项目-Temp\WebAPI
+npm.cmd install      # 注意：本机 npm.ps1 被执行策略禁用，统一用 npm.cmd
+npm.cmd start -- ci "任务" -C E:\proj\myapp --yes     # 与 bin/webai.cmd 等价
+npm.cmd start -- chat "写一个 helloworld.ts"          # 单轮对话
+npm.cmd start -- browser / status / probe / list      # 连接、状态、页面诊断、任务列表
+npx.cmd tsx scripts/smoke.ts                          # 本地冒烟测试（21 项，不依赖网页）
+```
 
 - 首次运行会弹出一个**专用 Edge 窗口**（独立 profile：`.runtime/edge-profile-deepseek`），请在其中手动登录一次；登录态由浏览器本体保存，本系统**不读取、不存储任何 Cookie/密码/令牌**。
 - 模型后端在 `config/backends.json` 中增删；新增网页 AI 只需实现一个新的 `IModelAdapter` 子类并在 `src/adapters/factory.ts` 注册。
@@ -43,7 +49,7 @@ npx.cmd tsx scripts/smoke.ts                         # 本地冒烟测试（21 �
 | 3 | DeepSeek 适配器 | ✅ 完成（2026-10-18 实机全测通过：登录检测/收发/多轮记忆/会话id提取/新建会话） |
 | 4 | 千问适配器 | 未开始（待用户配合登录 qianwen.com 一次性验证） |
 | 5 | 工具执行闭环 | ✅ 完成（2026-10-18 单次运行端到端通关：创建→测试失败→apply_patch 自修复→重测→ALL PASSED；CDP SSE 网络通道为主检测源） |
-| 6 | 模型切换/状态管理 | 未开始 |
+| 6 | 模型切换/状态管理 | 🔶 部分完成（`ci --resume/--continue` 断点续跑已实现并实测；跨模型切换待做） |
 | 7 | 界面/打包/完整文档 | 未开始 |
 
 ## 已知限制

@@ -16,7 +16,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createAdapter } from './adapters/factory.js';
 import type { BackendConfig } from './adapters/IModelAdapter.js';
-import { AgentLoop } from './runtime/agent.js';
+import { AgentLoop, type AgentSessionState } from './runtime/agent.js';
 import { existsSync, mkdirSync, readdirSync } from 'node:fs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -64,19 +64,18 @@ async function main() {
   const backendId = process.env['BACKEND_ID'];
 
   if (!cmd || ['help', '--help', '-h'].includes(cmd)) {
-    console.log(`WebAI Bridge CLI
-  start -- browser              启动/复用专用 Edge 并附加 DeepSeek（首次需手动登录）
-  start -- status               查看连接状态、能力确认、最近错误
-  start -- probe                页面结构诊断（校准选择器）
-  start -- send "..."           发送消息
-  start -- reply                等待最新回复
-  start -- chat "..."           发送并等待回复
-  start -- state                显示网页端会话状态（URL/会话id/消息数）
-  start -- new                  新建会话
-  start -- agent "任务规定" [--dir 工作区] [--max 20] [--yes]
-                                自动迭代闭环：网页模型提出操作，本地执行并反馈
-  start -- list                 列出已完成/进行中的本地任务状态
-可用 BACKEND_ID 环境变量指定后端 id。`);
+    console.log(`WebAI Bridge CLI —— 类 Claude Code 的本地 AI Agent 命令行
+  webai ci "任务目标" [-C 目录] [-t 轮数] [--yes] [--resume ID | --continue]
+                                     一键任务闭环（默认在当前目录工作，完成=退出码0）
+                                     -C 指定工作区；-t 本轮最大轮数；--yes 自动放行高风险操作
+                                     --resume 恢复指定任务；--continue 恢复同工作区最近未完成任务
+  start -- agent "任务" [--dir dir] [--max N] [--yes]   旧版入口（默认工作区 sandbox-tasks/current）
+  start -- chat "..."           单轮对话：发送并等待回复
+  start -- send/reply/new/state 浏览器会话基础操作
+  start -- browser/status/probe 连接、状态、页面结构诊断
+  start -- list                 列出本地任务会话（.runtime/tasks）
+启动器：项目 bin/webai.cmd（任意目录调用，如 webai.cmd ci "修复所有测试" -C E:\\proj）
+可用 BACKEND_ID 环境变量指定后端 id；WEBAI_DEBUG=1 输出回复等待诊断。`);
     return;
   }
 
@@ -218,41 +217,106 @@ async function main() {
       }
       return;
     }
+    case 'ci':
     case 'agent': {
-      const flagIndex = rest.findIndex((r) => r.startsWith('--'));
-      const goalWords = flagIndex === -1 ? rest : rest.slice(0, flagIndex);
-      const flags = flagIndex === -1 ? [] : rest.slice(flagIndex);
+      const ci = cmd === 'ci';
+      // 解析参数：非旗标 token 视作目标语句（Claude Code 风格）；-C/--dir 指定工作区
+      const goalWords: string[] = [];
+      const flags: Record<string, string | boolean> = {};
+      for (let i = 0; i < rest.length; i++) {
+        const a = rest[i]!;
+        if (a === '--yes') flags['yes'] = true;
+        else if (a === '--continue') flags['continue'] = true;
+        else if (a === '--debug') flags['debug'] = true;
+        else if (a === '--resume') { flags['resume'] = rest[++i] ?? ''; }
+        else if (a === '-C' || a === '--dir') { flags['dir'] = rest[++i] ?? '.'; }
+        else if (a === '--max-turns' || a === '-t' || a === '--max') { flags['turns'] = rest[++i] ?? ''; }
+        else goalWords.push(a);
+      }
       const goal = goalWords.join(' ').trim();
-      if (!goal) {
-        console.error('用法：start -- agent "任务目标" [--dir 相对目录] [--max 20] [--yes]');
+      if (flags['debug']) process.env['WEBAI_DEBUG'] = '1';
+      const resumeId = typeof flags['resume'] === 'string' ? (flags['resume'] as string).trim() : '';
+      if (!goal && !resumeId && !flags['continue']) {
+        console.error(
+          ci
+            ? '用法：webai ci "任务目标" [-C 工作区目录] [-t 轮数] [--yes] [--resume 任务ID | --continue]'
+            : '用法：start -- agent "任务目标" [--dir 相对目录] [--max 20] [--yes]',
+        );
         process.exitCode = 1;
         return;
       }
-      if (flags.includes('--yes')) {
-        console.log('[agent] 已启用 --yes：高风险操作自动放行（不再逐项人工确认）。');
-      }
-      const dirFlag = flags.find((f) => f.startsWith('--dir'));
-      const dirIdx = dirFlag ? flags.indexOf(dirFlag) : -1;
-      const workspaceRoot = dirFlag && dirIdx >= 0 ? path.resolve(ROOT, flags[dirIdx + 1] ?? '.') : path.resolve(ROOT, 'sandbox-tasks', 'current');
+      // 工作区：ci 默认当前进程目录（同 Claude Code 在目标目录里运行）；agent 保持旧默认
+      const dirValue = typeof flags['dir'] === 'string' ? flags['dir'] : '';
+      const workspaceRoot = dirValue
+        ? path.resolve(process.cwd(), dirValue)
+        : ci
+          ? process.cwd()
+          : path.resolve(ROOT, 'sandbox-tasks', 'current');
       if (!existsSync(workspaceRoot)) {
         mkdirSync(workspaceRoot, { recursive: true });
-        console.log(`[agent] 工作区不存在，已创建：${workspaceRoot}`);
+        console.log(`[ci] 工作区不存在，已创建：${workspaceRoot}`);
       }
-      const maxFlag = flags.find((f) => f.startsWith('--max'));
-      const maxIdx = maxFlag ? flags.indexOf(maxFlag) : -1;
-      const maxRounds = maxFlag && maxIdx >= 0 ? Number(flags[maxIdx + 1] ?? 15) : 15;
+      const maxRounds = Number(flags['turns'] ?? 15);
+      const turns = Number.isFinite(maxRounds) && maxRounds > 0 ? maxRounds : 15;
+      const autoApprove = flags['yes'] === true;
+      if (autoApprove) console.log('[ci] 已启用 --yes：高风险操作自动放行（不再逐项人工确认）。');
+
+      // 续跑：--resume <id> 精确恢复；--continue 恢复同工作区最近的未完成任务
+      let resumeSession: AgentSessionState | undefined;
+      const tasksDir = path.join(ROOT, '.runtime', 'tasks');
+      const mine = (s: AgentSessionState) =>
+        path.resolve(s?.workspaceRoot ?? '') === path.resolve(workspaceRoot);
+      if (resumeId) {
+        const f = path.join(tasksDir, `${resumeId}.json`);
+        if (!existsSync(f)) {
+          console.error(`[ci] 未找到任务会话：${resumeId}（用 start -- list 查看全部任务）`);
+          process.exitCode = 1;
+          return;
+        }
+        resumeSession = JSON.parse(readFileSync(f, 'utf-8')) as AgentSessionState;
+      } else if (flags['continue'] === true) {
+        if (!existsSync(tasksDir)) {
+          console.error('[ci] 尚无任何任务会话，无可续跑。');
+          process.exitCode = 1;
+          return;
+        }
+        const candidates = readdirSync(tasksDir)
+          .filter((f) => f.endsWith('.json'))
+          .map((f) => {
+            try {
+              return JSON.parse(readFileSync(path.join(tasksDir, f), 'utf-8')) as AgentSessionState;
+            } catch {
+              return null;
+            }
+          })
+          .filter((s): s is AgentSessionState => !!s && mine(s) && s.status !== 'finished')
+          .sort((x, y) => y.updatedAt - x.updatedAt);
+        if (candidates.length === 0) {
+          console.error(`[ci] 工作区 ${workspaceRoot} 没有可续跑的未完成任务。`);
+          process.exitCode = 1;
+          return;
+        }
+        resumeSession = candidates[0];
+      }
+      if (resumeSession) {
+        console.log(
+          `[ci] 续跑会话=${resumeSession.sessionId}（状态 ${resumeSession.status}，已完成 ${resumeSession.rounds.length} 轮）`,
+        );
+      }
+
       const conn = await adapter.connect();
       if (!conn.ok) {
-        console.error(`[cli] 连接失败：${conn.code} ${conn.message}`);
+        console.error(`[ci] 连接失败：${conn.code} ${conn.message}`);
         process.exitCode = 1;
         return;
       }
       const wf = cfgFile.defaults.waitForResponse;
       const loop = new AgentLoop(adapter, {
-        goal,
+        goal: resumeSession ? resumeSession.goal : goal,
         workspaceRoot,
-        maxRounds: Number.isFinite(maxRounds) && maxRounds > 0 ? maxRounds : 15,
-        autoApprove: flags.includes('--yes'),
+        maxRounds: turns,
+        autoApprove,
+        resumeSession,
         waitFor: {
           baselineAssistantCount: 0,
           totalTimeoutMs: wf.totalTimeoutMs,
@@ -261,10 +325,14 @@ async function main() {
           rejectPatterns: ['服务繁忙', '请稍后再试', '访问被拒绝'],
         },
       });
-      console.log(`[agent] 会话=${loop.sessionId || '（运行中生成）'} 工作区=${workspaceRoot} 最大轮数=${maxRounds}`);
+      console.log(
+        `[ci] 任务=${loop.sessionId} 工作区=${workspaceRoot} 后端=${backend.displayName} 本轮上限=${turns}轮${autoApprove ? ' 自动放行' : ''}`,
+      );
       const done = await loop.run();
-      console.log(`[agent] 结束：${done.status}`);
-      if (done.summary) console.log(`[agent] 总结：${done.summary}`);
+      console.log(`[ci] 结束：${done.status}（${done.rounds.length} 轮）`);
+      if (done.summary) console.log(`[ci] 总结：${done.summary}`);
+      // CI 语义：完成=0，失败/停止=1（方便流水线判断）
+      process.exitCode = done.status === 'finished' ? 0 : 1;
       return;
     }
     default:

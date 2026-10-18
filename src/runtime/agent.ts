@@ -27,13 +27,16 @@ export interface AgentLoopOptions {
   autoApprove: boolean;
   /** 停止钩子（CLI 的 stop signal） */
   shouldStop?: () => boolean;
+  /** 续跑：注入已保存的会话状态（transcript/进度/已执行签名），从中断点继续 */
+  resumeSession?: AgentSessionState;
 }
 
 export interface AgentRoundLog {
   round: number;
   sentChars: number;
   replyChars: number;
-  calls: Array<{ name: string; ok: boolean }>;
+  /** ok 状态下记录 digest 与输出片段：供 CLI 展示与续跑重建上下文 */
+  calls: Array<{ name: string; ok: boolean; digest?: string; output?: string }>;
   finish: string | null;
   error?: string;
 }
@@ -49,6 +52,8 @@ export interface AgentSessionState {
   rounds: AgentRoundLog[];
   conversation: WebConversationState | null;
   transcript: ChatTurn[];
+  /** 已真实执行过的调用签名（防止续跑时重放；与内存 executedKeys 同步落盘） */
+  executedKeys: string[];
   summary?: string;
 }
 
@@ -68,24 +73,35 @@ export class AgentLoop {
     this.adapter = adapter;
     this.options = options;
     this.policy = loadPolicy(options.workspaceRoot);
-    this.session = {
-      sessionId: `t${Date.now().toString(36)}`,
-      goal: options.goal,
-      workspaceRoot: options.workspaceRoot,
-      adapterId: adapter.backendId,
-      status: 'running',
-      startedAt: Date.now(),
-      updatedAt: Date.now(),
-      rounds: [],
-      conversation: null,
-      transcript: [],
-    };
+    const resumed = options.resumeSession ?? null;
+    this.executedKeys = new Set(resumed?.executedKeys ?? []);
+    this.session = resumed
+      ? {
+          ...resumed,
+          status: 'running',
+          summary: undefined,
+          updatedAt: Date.now(),
+        }
+      : {
+          sessionId: `t${Date.now().toString(36)}`,
+          goal: options.goal,
+          workspaceRoot: options.workspaceRoot,
+          adapterId: adapter.backendId,
+          status: 'running',
+          startedAt: Date.now(),
+          updatedAt: Date.now(),
+          rounds: [],
+          conversation: null,
+          transcript: [],
+          executedKeys: [],
+        };
   }
 
   private saveSession(): void {
     const dir = path.resolve(process.cwd(), '.runtime', 'tasks');
     mkdirSync(dir, { recursive: true });
     this.session.updatedAt = Date.now();
+    this.session.executedKeys = [...this.executedKeys];
     writeFileSync(path.join(dir, `${this.session.sessionId}.json`), JSON.stringify(this.session, null, 2), 'utf-8');
   }
 
@@ -147,6 +163,13 @@ export class AgentLoop {
 
   async run(): Promise<AgentSessionState> {
     const { options } = this;
+    const resumed = options.resumeSession ?? null;
+    if (resumed && resumed.status === 'finished') {
+      this.session.summary = resumed.summary;
+      this.session.status = 'finished';
+      return this.session; // 无需任何操作
+    }
+    const startRound = this.session.rounds.length;
     const conn = await this.adapter.connect();
     if (!conn.ok) {
       this.session.status = 'failed';
@@ -154,13 +177,13 @@ export class AgentLoop {
       this.saveSession();
       return this.session;
     }
-    // 每次任务从新会话开始（避免上一任务的对话残留干扰）
+    // 每次运行都从新网页会话开始（续跑的新上下文由第一条消息重建，避免残留干扰）
     await this.adapter.startNewConversation();
 
     const systemMsg = buildSystemMessage(options.goal, options.workspaceRoot);
-    let message = systemMsg;
+    let message = resumed ? buildResumeMessage(this.session) : systemMsg;
 
-    for (let round = 1; round <= options.maxRounds; round++) {
+    for (let round = startRound + 1; round <= startRound + options.maxRounds; round++) {
       if (options.shouldStop?.()) {
         this.session.status = 'stopped';
         this.session.summary = '用户手动停止。';
@@ -255,12 +278,17 @@ export class AgentLoop {
       for (const c of freshCalls) {
         this.executedKeys.add(`${c.name}::${JSON.stringify(c.args)}`);
       }
-      log.calls = results.map((r) => ({ name: r.name, ok: r.result.ok }));
+      log.calls = results.map((r, i) => ({
+        name: r.name,
+        ok: r.result.ok,
+        digest: digestOfArgs(freshCalls[i]?.args),
+        output: toolResultSnippet(r.result.output),
+      }));
       this.session.rounds.push(log);
       this.saveSession();
-      console.log(
-        `[agent] 第 ${round} 轮：执行 ${results.map((r) => `${r.name}(${r.result.ok ? 'ok' : 'fail'})`).join(' ')}`,
-      );
+      for (const c of log.calls) {
+        console.log(`[agent] 第 ${round} 轮 ● ${c.name}${c.digest ? ` "${c.digest}"` : ''} → ${c.ok ? '✓' : '✗'}`);
+      }
 
       const loop = this.detectLoop();
       if (loop) {
@@ -308,6 +336,62 @@ function confirmPrompt(q: string): Promise<boolean> {
     };
     process.stdin.on('data', onData);
   });
+}
+
+/** 调用参数的简短摘要（日志/续跑上下文用）：优先人类可读键 */
+export function digestOfArgs(args: Record<string, unknown> | undefined): string {
+  if (!args) return '';
+  const cmd = typeof args['command'] === 'string' ? args['command'] : '';
+  if (cmd.trim()) return cmd.replace(/\s+/g, ' ').slice(0, 60);
+  const p = typeof args['path'] === 'string' ? args['path'] : '';
+  if (p.trim()) return p.replace(/\s+/g, ' ').slice(0, 60);
+  const q = typeof args['query'] === 'string' ? args['query'] : '';
+  if (q.trim()) return q.replace(/\s+/g, ' ').slice(0, 60);
+  const patch = typeof args['patch'] === 'string' ? args['patch'] : '';
+  if (patch.trim()) {
+    // 补丁摘要：目标路径 + 动作（新建/修改）
+    const firstLine = patch.split('\n')[0]?.trim() ?? '';
+    const creating = /=======\s*\n+=======/.test(patch.split('\n').slice(1, 4).join('\n'));
+    return `${firstLine.replace(/^path:\s*/, 'path:')}（${creating ? '新建' : '修改'}）`.slice(0, 80);
+  }
+  return JSON.stringify(args)
+    .replace(/\s+/g, ' ')
+    .slice(0, 80);
+}
+
+/** 工具输出片段（续跑上下文用）：压平空白并截断 */
+export function toolResultSnippet(output: string): string {
+  const t = output.replace(/\r\n/g, '\n').trim().replace(/\n{3,}/g, '\n\n');
+  return t.length > 300 ? `${t.slice(0, 300)}\n…[截断，共 ${t.length} 字符]` : t;
+}
+
+/** 续跑首条消息（协议说明 + 已执行进展摘要） */
+export function buildResumeMessage(session: AgentSessionState): string {
+  const progress: Array<{ round: number; line: string; output?: string }> = [];
+  const finish = session.summary && session.status !== 'running' ? session.summary : null;
+  for (const r of session.rounds) {
+    if (r.calls.length > 0) {
+      const line = r.calls.map((c) => `${c.name}(${c.digest ?? ''})→${c.ok ? 'ok' : 'fail'}`).join('；');
+      progress.push({ round: r.round, line, output: r.calls.find((c) => !c.ok)?.output ?? r.calls[0]?.output });
+    } else if (r.error) {
+      progress.push({ round: r.round, line: `（未执行：${r.error}）` });
+    }
+  }
+  const base = buildSystemMessage(session.goal, session.workspaceRoot);
+  const tail = finish ? `\n\n上一轮结束时声明：<finish>${finish}</finish>（若工作尚未真正完成请继续完成并重新 <finish>）` : '';
+  return [
+    base,
+    '',
+    '# 续跑说明',
+    '这是一个此前中断任务（超时/轮数耗尽/手动停止）的续跑。网页端对话历史不保留，以下是已执行进展摘要：',
+    progress.map((p) => `- 第${p.round}轮 ${p.line}${p.output ? `；输出片段：${p.output}` : ''}`).join('\n') ||
+      '（尚无已执行步骤）',
+    '',
+    '本地文件系统的真实状态可能比上述摘要更新；不确定时用 list_files / read_file 重新确认，再继续未完成部分。',
+    '已成功执行过的调用不会重复执行（重复提交会被识别为重放）。不要重复已完成步骤，直接推进剩余工作；达成目标后以 <finish>总结</finish> 收尾。',
+    tail,
+  ]
+    .join('\n');
 }
 
 export { POLICY_FILENAME };
