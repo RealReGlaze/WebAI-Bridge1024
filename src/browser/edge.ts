@@ -1,0 +1,99 @@
+/**
+ * 专用 Edge 实例启动器 + CDP 附加器。
+ *
+ * 设计要点：
+ * - 启动一个独立的 Edge 实例，带独立 user-data-dir（项目内 .runtime/），
+ *   保证不会附加到用户正在使用的普通 Edge，也保证登录态可持久化。
+ * - 不在代码/配置中保存任何账号凭据；登录由用户在该 Edge 窗口中手动完成。
+ * - 仅使用 CDP（remote-debugging-port）附加，属于浏览器官方支持的调试通道。
+ */
+import { spawn } from 'node:child_process';
+import { existsSync, mkdirSync } from 'node:fs';
+import path from 'node:path';
+import { chromium, type BrowserContext, type Page } from 'playwright-core';
+
+export interface EdgeLaunchOptions {
+  debugPort: number;
+  /** 绝对路径的 profile 目录 */
+  userDataDir: string;
+  /** Edge 可执行文件；留空自动探测 */
+  executablePath?: string;
+  /** 启动后打开的初始 URL */
+  startUrl: string;
+}
+
+/** 常见 Edge 安装位置 */
+const EDGE_CANDIDATES = [
+  'C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe',
+  'C:\\Program Files\\Microsoft\\Edge\\Application\\msedge.exe',
+];
+
+export function detectEdgePath(explicit?: string): string {
+  if (explicit && existsSync(explicit)) return explicit;
+  for (const p of EDGE_CANDIDATES) {
+    if (existsSync(p)) return p;
+  }
+  throw new Error(
+    `未找到 Edge 可执行文件。可在 config/backends.json 中指定 browser.executablePath。已尝试：\n${EDGE_CANDIDATES.join('\n')}`,
+  );
+}
+
+/** 是否已有监听该端口的调试实例 */
+async function isCdpAlive(port: number): Promise<boolean> {
+  try {
+    const res = await fetch(`http://127.0.0.1:${port}/json/version`, { signal: AbortSignal.timeout(2000) });
+    return res.ok;
+  } catch {
+    return false;
+  }
+}
+
+/** 启动专用 Edge 实例（幂等：若该端口已有调试实例则直接复用）。返回是否新启动。 */
+export async function launchEdge(opts: EdgeLaunchOptions): Promise<boolean> {
+  if (await isCdpAlive(opts.debugPort)) {
+    console.log(`[edge] 端口 ${opts.debugPort} 已存在调试实例，直接复用。`);
+    return false;
+  }
+  mkdirSync(opts.userDataDir, { recursive: true });
+  const exe = detectEdgePath(opts.executablePath);
+  const args = [
+    `--remote-debugging-port=${opts.debugPort}`,
+    `--user-data-dir=${opts.userDataDir}`,
+    '--no-first-run',
+    '--no-default-browser-check',
+    '--disable-features=msEdgeReginaBadging', // 减少首次运行干扰提示（可选特性）
+    '--window-size=1400,950',
+    opts.startUrl,
+  ];
+  const child = spawn(exe, args, { detached: true, stdio: 'ignore' });
+  child.unref();
+  // 等待 CDP 端口就绪
+  for (let i = 0; i < 40; i++) {
+    await new Promise((r) => setTimeout(r, 500));
+    if (await isCdpAlive(opts.debugPort)) {
+      console.log(`[edge] 已启动专用 Edge（pid=${child.pid}，端口=${opts.debugPort}，profile=${path.basename(opts.userDataDir)}）。`);
+      return true;
+    }
+  }
+  throw new Error(`Edge 已启动但 ${opts.debugPort / 1000}s 内未出现 CDP 调试端口，请检查端口占用。`);
+}
+
+/** 附加到该实例（必须先 launchEdge） */
+export async function attachEdge(port: number): Promise<BrowserContext> {
+  const browser = await chromium.connectOverCDP(`http://127.0.0.1:${port}`);
+  const contexts = browser.contexts();
+  if (contexts.length === 0) throw new Error('CDP 已连接但没有可用的浏览器 context。');
+  return contexts[0]!;
+}
+
+/** 在 context 中确保打开了某 URL 的标签页并返回 */
+export async function ensurePage(context: BrowserContext, url: string): Promise<Page> {
+  for (const page of context.pages()) {
+    if (page.url().startsWith(url)) return page;
+  }
+  const page = context.pages()[0] ?? (await context.newPage());
+  if (!page.url().startsWith(url)) {
+    await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 60_000 });
+  }
+  return page;
+}

@@ -1,0 +1,41 @@
+{
+  "// 说明": "仅存配置，绝不含账号密码/Cookie/令牌。登录态由 Edge 专用 profile（.runtime/ 目录）承载。",
+  "defaults": {
+    "waitForResponse": {
+      "totalTimeoutMs": 600000,
+      "stablePolls": 3,
+      "pollIntervalMs": 800
+    }
+  },
+  "backends": [
+    {
+      "id": "deepseek",
+      "displayName": "DeepSeek 网页版",
+      "startUrl": "https://chat.deepseek.com/",
+      "adapterType": "deepseek-web",
+      "browser": {
+        "debugPort": 9223,
+        "profileDir": ".runtime/edge-profile-deepseek"
+      },
+      "enabled": true,
+      "capabilities": {
+        "multiTurnConversation": true,
+        "attachments": true,
+        "streaming": true
+      },
+      "notes": "选择器于 2026-10-18 实测校准（登录后：input 无 id、name=search）"
+    },
+    {
+      "id": "qianwen",
+      "displayName": "千问网页版",
+      "startUrl": "https://www.qianwen.com/",
+      "adapterType": "qianwen-web",
+      "browser": {
+        "debugPort": 9224,
+        "profileDir": ".runtime/edge-profile-qianwen"
+      },
+      "enabled": false,
+      "notes": "适配器第四阶段实现，暂未启用"
+    }
+  ]
+}

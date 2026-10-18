@@ -1,0 +1,23 @@
+{
+  "// 说明": "Agent 行为策略——仅供人工编辑，模型无权修改（ tools/policy.ts 会在每次执行时从磁盘重读，模型对它的任何\"修改\"都不生效）。",
+  "// writeDenyPrefixes": "工作区内禁止写入的路径前缀（../ 天然拒绝，这里额外保护桥接器自身）",
+  "// commandWhitelistPrefixes": "requireConfirm=true 的前缀仍可用，但每次都会弹出人工确认",
+  "writeDenyPrefixes": [".runtime/", "config/", "docs/"],
+  "readDenyPrefixes": [".runtime/tasks/", ".runtime/sessions/"],
+  "commandWhitelistPrefixes": [
+    { "prefix": "node", "requireConfirm": false },
+    { "prefix": "npm run", "requireConfirm": false },
+    { "prefix": "npm test", "requireConfirm": false },
+    { "prefix": "npm.cmd run", "requireConfirm": false },
+    { "prefix": "npm.cmd test", "requireConfirm": false },
+    { "prefix": "npx.cmd tsc", "requireConfirm": false },
+    { "prefix": "git status", "requireConfirm": false },
+    { "prefix": "git diff", "requireConfirm": false },
+    { "prefix": "git log", "requireConfirm": false },
+    { "prefix": "python", "requireConfirm": false },
+    { "prefix": "pip", "requireConfirm": true },
+    { "prefix": "npm install", "requireConfirm": true },
+    { "prefix": "git commit", "requireConfirm": true },
+    { "prefix": "git push", "requireConfirm": true }
+  ]
+}

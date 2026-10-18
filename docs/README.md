@@ -1,0 +1,60 @@
+# WebAI Bridge — 多网页 AI 通用桥接器 + 本地 Harness
+
+Windows 本地系统：用您已正常登录的网页 AI（DeepSeek / 千问等）作为 Agent Runtime 的推理后端，搭配本地工具执行闭环。
+
+## 安装（Windows）
+
+1. 要求：Node.js ≥ 20（本机 v24.16.0 已验证）、Edge 浏览器（Windows 自带）。
+2. 本项目所有依赖均为**项目局部安装**，不装全局包：
+   ```powershell
+   cd E:\All\创作类项目-Temp\WebAPI
+   npm.cmd install      # 注意：本机 npm.ps1 被执行策略禁用，统一用 npm.cmd
+   ```
+3. 无需下载 Playwright 浏览器包（仅 `playwright-core`，驱动已有的 Edge）。
+
+## 使用
+
+```powershell
+npm.cmd start                                        # 帮助
+npm.cmd start -- browser                             # 启动/复用专用 Edge，附加 DeepSeek
+npm.cmd start -- probe                               # 页面结构诊断（改版/改选择器时用）
+npm.cmd start -- state                               # 网页端会话状态（URL/会话 id/消息数）
+npm.cmd start -- chat "写一个 helloworld.ts"          # 发送并等待回复
+npm.cmd start -- new                                 # 新建网页会话
+npm.cmd start -- status                              # 后端连接状态
+npm.cmd start -- list                                # 列出本地任务状态（.runtime/tasks）
+npm.cmd start -- agent "任务目标" --dir sandbox-tasks/current --max 12 --yes
+                                                     # 自动迭代闭环（模型提请求，本地执行并反馈）
+npx.cmd tsx scripts/smoke.ts                         # 本地冒烟测试（21 项，不依赖网页）
+```
+
+- `--yes`：高风险操作自动放行；不带时写文件/高风险命令会逐项人工 y/n 确认。
+- `WEBAI_DEBUG=1` 环境变量：等待回复期间输出轮询诊断日志（检测通道状态）。
+
+- 首次运行会弹出一个**专用 Edge 窗口**（独立 profile：`.runtime/edge-profile-deepseek`），请在其中手动登录一次；登录态由浏览器本体保存，本系统**不读取、不存储任何 Cookie/密码/令牌**。
+- 模型后端在 `config/backends.json` 中增删；新增网页 AI 只需实现一个新的 `IModelAdapter` 子类并在 `src/adapters/factory.ts` 注册。
+
+## 阶段进度
+
+| 阶段 | 内容 | 状态 |
+|---|---|---|
+| 1 | 环境/Harness 调查 | ✅ 完成（目录为空，全新实现；Node24/Edge/Git 确认） |
+| 2 | Adapter 接口 + 通用浏览器原型 | ✅ 完成（CDD 附加 + Edge 专用实例） |
+| 3 | DeepSeek 适配器 | ✅ 完成（2026-10-18 实机全测通过：登录检测/收发/多轮记忆/会话id提取/新建会话） |
+| 4 | 千问适配器 | 未开始（待用户配合登录 qianwen.com 一次性验证） |
+| 5 | 工具执行闭环 | ✅ 完成（2026-10-18 单次运行端到端通关：创建→测试失败→apply_patch 自修复→重测→ALL PASSED；CDP SSE 网络通道为主检测源） |
+| 6 | 模型切换/状态管理 | 未开始 |
+| 7 | 界面/打包/完整文档 | 未开始 |
+
+## 已知限制
+
+- 网页 AI 的服务条款可能禁止自动化使用；每个适配器可用性都需实测，不保证长期可用。
+- 回复完成判定：网络通道为**确定性**判定（服务端 FINISHED 签名）；仅当网络通道不可用、退回 DOM 通道时才用"文本连续稳定"启发式（超长或分段渲染可能误判）。
+- 页面改版会导致选择器失效；用 `probe` 诊断后在 `config/backends.json` 的 `selectors` 覆盖即可，无需改代码。
+- DeepSeek 页面元素类名是哈希混淆的（如 `_5a8ac7a`），选择器只能基于 id/placeholder/文本定位。
+- tsx/esbuild 环境下 `page.evaluate` 传函数会被注入 `__name` 导致浏览器端 ReferenceError，需以字符串形式传 JS（适配器已遵循此模式）。
+- DeepSeek 的代码块会用"复制/下载"按钮渲染，`innerText` 提取会吞掉 ``` 围栏——因此协议使用 ⟦TOOLCALL⟧/⟦ARG…⟧ 这类不被 markdown 渲染器转换的 unicode 标记（U+27E6/27E7）。
+- 回复检测分两级：**首选网络通道**——CDP 旁听页面自身发出的 `POST /api/v0/chat/completion` SSE（PoW 挑战由页面原生计算，我们不构造/签名/重放任何请求，只是读取自己会话的响应），文本来自数据流、无渲染损伤，`response/status: FINISHED` 是确定性完成信号；**备用 DOM 通道**——消息计数（`ds-markdown` 数）+ 聊天区重组感知差分（前缀/包含/尾尾公共后缀三级）。
+- DeepSeek completion SSE 真实格式（2026-10-18 两次抓包实证，解析器已按此实现并有回归样本）：① 开头快照 `{"v":{"response":{"fragments":[{"type":"RESPONSE","content":"⟦前缀"}]}}}` 的 content 只是**当时已流出的前缀**；② 之后块为锚点式 `{"p":"response/fragments/-1/content","o":"APPEND","v":"X"}`（-1=当前活动 fragment）；③ 再之后的续写是**纯简写** `data: {"v":"X"}`，无 p/o，隐式沿用上一次 /content 路径；④ `quasi_status` 是 token 级状态（流早期就=FINISHED），**不能**当完成信号，只有 `{"p":"response/status","o":"SET","v":"FINISHED"}` 算数；⑤ 会话标题走同一 SSE 里的 `event: title`（独立短文本，勿混入正文）；⑥ `getResponseBody` 在流未结束时返回已缓冲前缀，因此只有出现 FINISHED 签名才落盘响应（dataReceived 500ms 节流滚动尝试）。
+- DeepSeek 会折叠重组历史消息，DOM 全文差分可能失效；网络通道不受此影响。单条响应 body 丢失时 DOM 通道有 90s 宽限窗口。
+- 「内容为 raw 参数」的协议设计：代码/补丁类参数写在 ⟦ARG x⟧…⟦/ARG⟧ 之间，避免 JSON 转义（实测模型在自由对话中无法稳定完成 `\"` 转义，DSML 原生模板也得靠归一化兜底）。
