@@ -146,6 +146,31 @@ function main() {
     p6.errors.length === 0 && p6.calls[0]?.name === 'list_files' ? pass('无 name: 前缀块') : fail('无 name: 前缀块', JSON.stringify(p6));
     void p6;
 
+    // 17b. 回归（2026-10-18 真实失败）：参数漏写 ⟦/ARG⟧ 收尾 + 行内接值
+    const leakParsed = parseReply(
+      '⟦TOOLCALL⟧name: read_file\n⟦ARG path⟧README.md\n⟦ARG maxLines⟧ 80\n⟦/TOOLCALL⟧',
+      defaultTools,
+    );
+    const leakCall = leakParsed.calls[0];
+    const leakOk =
+      leakCall?.name === 'read_file' &&
+      leakCall.args['path'] === 'README.md' &&
+      leakCall.args['maxLines'] === '80' &&
+      leakParsed.errors.length === 0;
+    leakOk ? pass('自适应参数解析（漏写收尾+行内值）') : fail('自适应参数解析（漏写收尾+行内值）', JSON.stringify(leakParsed));
+
+    // 17c. 回归：规范多行写法不受自适应解析影响（代码原样保留换行）
+    const multilineParsed = parseReply(
+      '⟦TOOLCALL⟧name: apply_patch\n⟦ARG patch⟧\npath: a.txt\n=======\nBienvenue\n=======\n⟦/ARG⟧\n⟦/TOOLCALL⟧',
+      defaultTools,
+    );
+    const patchArg = multilineParsed.calls[0]?.args['patch'];
+    const multilineOk =
+      typeof patchArg === 'string' &&
+      patchArg.startsWith('path: a.txt\n=======\nBienvenue') &&
+      !patchArg.includes('⟦');
+    multilineOk ? pass('多行参数内容保真（自适应解析后）') : fail('多行参数内容保真（自适应解析后）', JSON.stringify(patchArg));
+
     // 18. 真实 SSE 样本回归（2026-10-18 实测抓包）
     const sseSample = [
       'event: ready',

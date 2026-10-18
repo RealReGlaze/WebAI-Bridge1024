@@ -74,6 +74,7 @@ async function main() {
   start -- send/reply/new/state 浏览器会话基础操作
   start -- browser/status/probe 连接、状态、页面结构诊断
   start -- list                 列出本地任务会话（.runtime/tasks）
+  start -- show <ID> [--transcript]  查看某任务的轮次/总结/完整成果（嵌套被拦后成果不会失踪）
 启动器：项目 bin/webai.cmd（任意目录调用，如 webai.cmd ci "修复所有测试" -C E:\\proj）
 可用 BACKEND_ID 环境变量指定后端 id；WEBAI_DEBUG=1 输出回复等待诊断。`);
     return;
@@ -217,6 +218,44 @@ async function main() {
       }
       return;
     }
+    case 'show': {
+      const id = rest[0] ?? '';
+      const full = rest.includes('--transcript');
+      if (!id) {
+        console.error('用法：start -- show <任务ID> [--transcript]（ID 来自 start -- list）');
+        process.exitCode = 1;
+        return;
+      }
+      const f = path.join(ROOT, '.runtime', 'tasks', `${id}.json`);
+      if (!existsSync(f)) {
+        console.error(`[show] 未找到任务会话：${id}`);
+        process.exitCode = 1;
+        return;
+      }
+      const s = JSON.parse(readFileSync(f, 'utf-8')) as AgentSessionState;
+      console.log(`任务     ${s.sessionId}`);
+      console.log(`状态     ${s.status}   后端 ${s.adapterId}`);
+      console.log(`时间     开始 ${new Date(s.startedAt).toLocaleString()}  更新 ${new Date(s.updatedAt).toLocaleString()}`);
+      console.log(`工作区   ${s.workspaceRoot}`);
+      console.log(`目标     ${s.goal}`);
+      if (s.summary) console.log(`总结     ${s.summary}`);
+      console.log('轮次     ');
+      for (const r of s.rounds) {
+        const calls = r.calls.length
+          ? r.calls.map((c) => `${c.name}(${c.digest ?? ''})→${c.ok ? 'ok' : 'fail'}`).join('；')
+          : r.error ?? '-';
+        console.log(`  第${r.round}轮 ${calls}`);
+      }
+      if (full) {
+        console.log('==== 完整转录 ====');
+        for (const t of s.transcript) {
+          const head = t.role === 'user' ? '【用户】' : '【助手】';
+          const body = t.text.length > 2500 ? `${t.text.slice(0, 2500)}\n…[截断，共 ${t.text.length} 字符]` : t.text;
+          console.log(`${head}（${new Date(t.timestamp).toLocaleTimeString()}）\n${body}\n`);
+        }
+      }
+      return;
+    }
     case 'ci':
     case 'agent': {
       const ci = cmd === 'ci';
@@ -232,6 +271,17 @@ async function main() {
         else if (a === '-C' || a === '--dir') { flags['dir'] = rest[++i] ?? '.'; }
         else if (a === '--max-turns' || a === '-t' || a === '--max') { flags['turns'] = rest[++i] ?? ''; }
         else goalWords.push(a);
+      }
+      // 嵌套守卫：任务内不允许递归调用 webai 自身（防无限递归与网页配额透支）。
+      // run_command 继承本进程环境变量，其孙进程同样被拦截。
+      const parentId = process.env['WEBAI_AGENT_SESSION'];
+      if (parentId) {
+        console.error(
+          `[ci] 检测到嵌套调用（父任务 ${parentId}）：webai 禁止在任务内递归调用自身。` +
+            '请直接用 list_files / read_file 等工具完成检查，不要通过 run_command 启动新 Agent。',
+        );
+        process.exitCode = 1;
+        return;
       }
       const goal = goalWords.join(' ').trim();
       if (flags['debug']) process.env['WEBAI_DEBUG'] = '1';
@@ -256,8 +306,8 @@ async function main() {
         mkdirSync(workspaceRoot, { recursive: true });
         console.log(`[ci] 工作区不存在，已创建：${workspaceRoot}`);
       }
-      const maxRounds = Number(flags['turns'] ?? 15);
-      const turns = Number.isFinite(maxRounds) && maxRounds > 0 ? maxRounds : 15;
+      const maxRounds = Math.min(Math.max(Number(flags['turns'] ?? 15) || 15, 1), 50); // 钳制防模型任意传大值
+      const turns = maxRounds;
       const autoApprove = flags['yes'] === true;
       if (autoApprove) console.log('[ci] 已启用 --yes：高风险操作自动放行（不再逐项人工确认）。');
 
@@ -328,6 +378,8 @@ async function main() {
       console.log(
         `[ci] 任务=${loop.sessionId} 工作区=${workspaceRoot} 后端=${backend.displayName} 本轮上限=${turns}轮${autoApprove ? ' 自动放行' : ''}`,
       );
+      // 注入会话标识环境变量：run_command 派生的孙进程（含 webai 自身）将因 WEBAI_AGENT_SESSION 被拒
+      process.env['WEBAI_AGENT_SESSION'] = loop.sessionId;
       const done = await loop.run();
       console.log(`[ci] 结束：${done.status}（${done.rounds.length} 轮）`);
       if (done.summary) console.log(`[ci] 总结：${done.summary}`);

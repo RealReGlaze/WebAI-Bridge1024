@@ -9,4 +9,6 @@ if not exist "node_modules\.bin\tsx.cmd" (
   exit /b 1
 )
 call node_modules\.bin\tsx.cmd src\index.ts %*
+set WEBAI_EL=%ERRORLEVEL%
 popd
+exit /b %WEBAI_EL%

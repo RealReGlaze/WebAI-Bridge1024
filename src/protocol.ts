@@ -88,6 +88,8 @@ export function buildSystemMessage(goal: string, workspaceRoot: string, tools: T
     '6. ok=false 且语义含"拒绝"时不要原样重试；纠正或 <finish> 说明受阻原因。',
     '7. 需要操作就必须真的输出调用块，不能只在文字里说"我将要执行"。',
     '   你也可以用你的原生调用模板（invoke/parameter），Harness 两种都识别。',
+    '8. 严格禁止用 run_command 启动 webai/webai.cmd 本身或任何嵌套 Agent 任务（会被环境守卫拒绝）。',
+    '   了解目录/文件用 list_files 与 read_file 即可，不需要也不允许递归调用本系统。',
     '',
     '现在开始：先了解任务与工作区（可用 list_files / read_file），然后执行目标。',
   ].join('\n');
@@ -199,10 +201,24 @@ function parseRawBlock(raw: string, tools: Tool[], errors: string[]): ToolCall |
     return null;
   }
   const args: Record<string, unknown> = {};
-  const argRe = new RegExp(ARG_START_PREFIX + '([A-Za-z_][\\w]*)' + ARG_END_MARKUP + '\\n?([\\s\\S]*?)' + ARG_END, 'g');
-  let am: RegExpExecArray | null;
-  while ((am = argRe.exec(t)) !== null) {
-    args[am[1]!] = (am[2] ?? '').trim();
+  // 参数解析（自适应）：
+  //   规范写法：⟦ARG name⟧\n值...⟦/ARG⟧（值可多行，代码原样保留换行）
+  //   模型漏写收尾：...⟦ARG name2⟧...（上一个参数值顺延到下一个开标记处自动闭合）
+  //   行内写法：⟦ARG name⟧值 同行接值
+  // 值边界 = min(下一个 ⟦ARG⟧ 开标记起点, 下一个 ⟦/ARG⟧, 块尾)
+  const markerRe = new RegExp(ARG_START_PREFIX + '([A-Za-z_][\\w]*)' + ARG_END_MARKUP, 'g');
+  const markers: Array<{ name: string; mStart: number; vStart: number }> = [];
+  let mm: RegExpExecArray | null;
+  while ((mm = markerRe.exec(t)) !== null) {
+    markers.push({ name: mm[1]!, mStart: mm.index, vStart: mm.index + mm[0].length });
+  }
+  for (let i = 0; i < markers.length; i++) {
+    const cur = markers[i]!;
+    let end = t.indexOf(ARG_END, cur.vStart);
+    if (end === -1) end = t.length;
+    if (i + 1 < markers.length) end = Math.min(end, markers[i + 1]!.mStart);
+    const value = t.slice(cur.vStart, end).replace(/^\r?\n/, '').trim();
+    if (!(cur.name in args)) args[cur.name] = value;
   }
   return validateAndBuild(name, args, t, tools, errors);
 }

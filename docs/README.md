@@ -58,6 +58,8 @@ npx.cmd tsx scripts/smoke.ts                          # 本地冒烟测试（21 
 - 回复完成判定：网络通道为**确定性**判定（服务端 FINISHED 签名）；仅当网络通道不可用、退回 DOM 通道时才用"文本连续稳定"启发式（超长或分段渲染可能误判）。
 - 页面改版会导致选择器失效；用 `probe` 诊断后在 `config/backends.json` 的 `selectors` 覆盖即可，无需改代码。
 - DeepSeek 页面元素类名是哈希混淆的（如 `_5a8ac7a`），选择器只能基于 id/placeholder/文本定位。
+- 任务内**禁止嵌套调用 webai 自身**（协议禁令 + `WEBAI_AGENT_SESSION` 环境守卫，run_command 派生的孙进程同样被拦）。查看某任务完整成果用 `webai start -- show <ID> [--transcript]`。
+- `-t/--max-turns` 上限被钳制为 1~50，防止模型自行传入超大轮数。
 - tsx/esbuild 环境下 `page.evaluate` 传函数会被注入 `__name` 导致浏览器端 ReferenceError，需以字符串形式传 JS（适配器已遵循此模式）。
 - DeepSeek 的代码块会用"复制/下载"按钮渲染，`innerText` 提取会吞掉 ``` 围栏——因此协议使用 ⟦TOOLCALL⟧/⟦ARG…⟧ 这类不被 markdown 渲染器转换的 unicode 标记（U+27E6/27E7）。
 - 回复检测分两级：**首选网络通道**——CDP 旁听页面自身发出的 `POST /api/v0/chat/completion` SSE（PoW 挑战由页面原生计算，我们不构造/签名/重放任何请求，只是读取自己会话的响应），文本来自数据流、无渲染损伤，`response/status: FINISHED` 是确定性完成信号；**备用 DOM 通道**——消息计数（`ds-markdown` 数）+ 聊天区重组感知差分（前缀/包含/尾尾公共后缀三级）。
