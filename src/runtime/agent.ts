@@ -40,6 +40,8 @@ export interface AgentRoundLog {
   calls: Array<{ name: string; ok: boolean; digest?: string; output?: string }>;
   finish: string | null;
   error?: string;
+  /** 本轮模型侧思考过程摘录（页面提供时才有；跨模型交接时随进展一并移交） */
+  thinking?: string;
 }
 
 export interface AgentSessionState {
@@ -182,7 +184,12 @@ export class AgentLoop {
     await this.adapter.startNewConversation();
 
     const systemMsg = buildSystemMessage(options.goal, options.workspaceRoot);
-    let message = resumed ? buildResumeMessage(this.session) : systemMsg;
+    let message = resumed ? buildResumeMessage(this.session, this.adapter.backendId) : systemMsg;
+    if (resumed) {
+      // 交接完成后记录当前执行后端（供下一次续跑/交接继续追溯）
+      this.session.adapterId = this.adapter.backendId;
+      this.saveSession();
+    }
 
     // 动态轮数预算：hard cap = options.maxRounds；
     // ask 模式（模型在首轮自声明 <mode>ask</mode>）收缩到 3 轮，work 按原预算走。
@@ -230,8 +237,9 @@ export class AgentLoop {
         return this.session;
       }
       const text = reply.value.text.replace(/^回[复答][:：]/, '').trim();
+      const thinking = (reply.value.thinking ?? '').trim();
       this.session.transcript.push({ role: 'user', text: message, timestamp: Date.now() });
-      this.session.transcript.push({ role: 'assistant', text, timestamp: Date.now() });
+      this.session.transcript.push({ role: 'assistant', text, thinking: thinking || undefined, timestamp: Date.now() });
 
       const parsed = parseReply(text);
       // 模式自声明：ask 快问快答 → 收缩剩余轮数预算
@@ -249,6 +257,7 @@ export class AgentLoop {
         replyChars: text.length,
         calls: [],
         finish: parsed.finish,
+        thinking: thinking || undefined,
       };
 
       if (parsed.errors.length > 0 && freshCalls.length === 0) {
@@ -414,32 +423,64 @@ export function toolResultSnippet(output: string): string {
   return t.length > 300 ? `${t.slice(0, 300)}\n…[截断，共 ${t.length} 字符]` : t;
 }
 
-/** 续跑首条消息（协议说明 + 已执行进展摘要） */
-export function buildResumeMessage(session: AgentSessionState): string {
-  const progress: Array<{ round: number; line: string; output?: string }> = [];
+/** 跨模型交接 / 续跑首条消息（协议说明 + 已执行进展 + 助手回复/思考摘录）。
+ *  currentBackendId ≠ 原会话后端时输出「跨模型交接」段：显式告知模型换了执行方，
+ *  并移交此前模型的回复与思考管道，防止浏览器端会话（原网页对话）丢失导致上下文断链。 */
+export function buildResumeMessage(session: AgentSessionState, currentBackendId = ''): string {
+  const progress: Array<{ round: number; line: string; output?: string; thinking?: string }> = [];
   const finish = session.summary && session.status !== 'running' ? session.summary : null;
   for (const r of session.rounds) {
     if (r.calls.length > 0) {
       const line = r.calls.map((c) => `${c.name}(${c.digest ?? ''})→${c.ok ? 'ok' : 'fail'}`).join('；');
-      progress.push({ round: r.round, line, output: r.calls.find((c) => !c.ok)?.output ?? r.calls[0]?.output });
+      progress.push({
+        round: r.round,
+        line,
+        output: r.calls.find((c) => !c.ok)?.output ?? r.calls[0]?.output,
+        thinking: r.thinking,
+      });
     } else if (r.error) {
-      progress.push({ round: r.round, line: `（未执行：${r.error}）` });
+      progress.push({ round: r.round, line: `（未执行：${r.error}）`, thinking: r.thinking });
     }
   }
+  const crossModel = !!currentBackendId && session.adapterId !== currentBackendId;
   const base = buildSystemMessage(session.goal, session.workspaceRoot);
   const tail = finish ? `\n\n上一轮结束时声明：<finish>${finish}</finish>（若工作尚未真正完成请继续完成并重新 <finish>）` : '';
+
+  const head = crossModel
+    ? [
+        '',
+        '# 跨模型交接',
+        `该任务此前由后端「${session.adapterId}」处理；本次由「${currentBackendId}」接手。原网页会话不跨后端保留，本消息即全部交接内容。`,
+        '以下已执行进展与此前模型的回复/思考摘录均已核实过（工具结果来自本地真实执行，可信）。',
+      ]
+    : ['', '# 续跑说明', '这是一个此前中断任务（超时/轮数耗尽/手动停止）的续跑。网页端对话历史不保留，以下是已执行进展摘要：'];
+
+  // 助手回复/思考摘录（跨模型时完整提供；同后端续跑也附思考摘录，帮助找回推理线索）
+  const assistantExcerpts = session.transcript
+    .filter((t) => t.role === 'assistant' && ((crossModel && t.text.trim()) || t.thinking))
+    .slice(-8)
+    .map((t, i) => {
+      const txt = t.text.trim().slice(0, crossModel ? 400 : 160);
+      const think = t.thinking ? `\n  思考片段：${t.thinking.replace(/\s+/g, ' ').slice(0, 300)}` : '';
+      return `- （此前第 ${i + 1} 条回复）${txt}${think}`;
+    })
+    .join('\n');
+
   return [
     base,
-    '',
-    '# 续跑说明',
-    '这是一个此前中断任务（超时/轮数耗尽/手动停止）的续跑。网页端对话历史不保留，以下是已执行进展摘要：',
-    progress.map((p) => `- 第${p.round}轮 ${p.line}${p.output ? `；输出片段：${p.output}` : ''}`).join('\n') ||
-      '（尚无已执行步骤）',
-    '',
+    ...head,
+    progress
+      .map(
+        (p) =>
+          `- 第${p.round}轮 ${p.line}${p.output ? `；输出片段：${p.output}` : ''}${p.thinking ? `；思考片段：${p.thinking.replace(/\s+/g, ' ').slice(0, 240)}` : ''}`,
+      )
+      .join('\n') || '（尚无已执行步骤）',
+    assistantExcerpts ? ['此前助手回复/思考摘录：', assistantExcerpts, ''].join('\n') : '',
     '本地文件系统的真实状态可能比上述摘要更新；不确定时用 list_files / read_file 重新确认，再继续未完成部分。',
     '已成功执行过的调用不会重复执行（重复提交会被识别为重放）。不要重复已完成步骤，直接推进剩余工作；达成目标后以 <finish>总结</finish> 收尾。',
     tail,
   ]
+    .filter((s) => s !== '')
     .join('\n');
 }
 

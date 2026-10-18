@@ -12,7 +12,7 @@ export interface BackendConfig {
   /** 网页地址 */
   startUrl: string;
   /** 适配器类型名，决定运行时加载哪个适配器实现 */
-  adapterType: 'deepseek-web' | 'qianwen-web' | 'generic-web';
+  adapterType: 'deepseek-web' | 'mimo-web' | 'qianwen-web' | 'generic-web';
   /** 浏览器会话配置 */
   browser: {
     /** CDP 远程调试端口 */
@@ -73,6 +73,8 @@ export interface ChatTurn {
   role: 'user' | 'assistant';
   text: string;
   timestamp: number;
+  /** 思考过程（模型侧推理文本；页面提供了才记录，用于跨模型交接） */
+  thinking?: string;
 }
 
 /** waitForResponse 的可调参数 */
@@ -128,10 +130,10 @@ export abstract class IModelAdapter {
   /** 发送一条用户消息（不等待回复） */
   abstract sendMessage(text: string): Promise<AdapterResult<void>>;
 
-  /** 获取完整回复（以页面文本稳定为准） */
+  /** 获取完整回复（以页面文本稳定为准；thinking=思考过程文本，页面提供时才非空） */
   abstract waitForResponse(
     opts: WaitForResponseOptions,
-  ): Promise<AdapterResult<{ text: string; complete: boolean }>>;
+  ): Promise<AdapterResult<{ text: string; complete: boolean; thinking?: string }>>;
 
   /** 获取网页端会话状态 */
   abstract getConversationState(): Promise<WebConversationState>;

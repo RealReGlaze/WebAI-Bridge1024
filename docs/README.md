@@ -24,7 +24,14 @@ webai.cmd --yes -t 20            # 高风险自动放行；轮数预算 20
 - 每次在 `>>` 后输入任务目标回车即执行一个任务，可连续多轮交互。
 - **默认工作区 = 你打开命令行时所在的目录**（`-C` 可临时切换；相对路径也基于它解析）。启动器会跨目录捕获原始目录，与项目根无关。
 - **工作模式由模型自判定**：模型在首轮回复声明 `<mode>ask</mode>`（快问快答，轮数预算自动收缩为 3 轮）或 `<mode>work</mode>`（正式执行任务，按启动预算走）。
-- 内置命令：`/tasks` 任务列表 · `/show <ID>` 任务详情 · `/auto on|off` 自动审批开关 · `/accept-all` 全部允许（二次确认） · `/exit` 退出。
+- 内置命令：`/tasks` 任务列表 · `/show <ID>` 任务详情 · `/auto on|off` 自动审批开关 · `/accept-all` 全部允许（二次确认） · `/switch [后端]` 切换模型 · `/continue [ID]` 续跑（跨模型交接） · `/exit` 退出。
+
+**多后端与跨模型交接**：
+
+- `webai.cmd --backend mimo`（或 `/switch mimo`）切换模型后端；`/switch` 不带参数列出全部可用后端。`ci` 同样支持 `webai.cmd ci ... --backend mimo`。
+- 已完成后端：DeepSeek（`deepseek`，已验证）、小米 MiMo（`mimo`，`aistudio.xiaomimimo.com/#/c`，**首次使用需在专用 Edge 窗口手动登录小米账号**，profile 独立 `.runtime/edge-profile-mimo`）。
+- **跨模型交接**：任务停留在 `--resume <ID> --backend <新后端>`（交互模式 `/switch` 后 `/continue`）即可由新模型接手——接手消息包含原后端署名、全部已执行轮次、每轮工具结果与**原模型思考过程摘录**，工具结果都来自本地真实执行，浏览器端会话丢失不影响上下文。同一任务可在 deepseek ↔ mimo 间反复交接。
+- MiMo 选择器按未登录态校准（输入框=textarea、登录指示=未登录/立即登录）；登录后如页面结构变化，用 `start -- probe --backend mimo` 诊断，并在 `config/backends.json` 的 `selectors` 里覆盖。
 - 键盘输入中文正常；若脚本管道喂入中文请先把宿主 pipe 编码设为 UTF-8（PowerShell 5.1 默认对原生程序管道用 ASCII，会把中文变 `?`）：
   ```powershell
   $OutputEncoding=[Console]::InputEncoding=[Console]::OutputEncoding=[System.Text.UTF8Encoding]::new()
@@ -65,7 +72,7 @@ npx.cmd tsx scripts/smoke.ts                          # 本地冒烟测试（21 
 | 3 | DeepSeek 适配器 | ✅ 完成（2026-10-18 实机全测通过：登录检测/收发/多轮记忆/会话id提取/新建会话） |
 | 4 | 千问适配器 | 未开始（待用户配合登录 qianwen.com 一次性验证） |
 | 5 | 工具执行闭环 | ✅ 完成（2026-10-18 单次运行端到端通关：创建→测试失败→apply_patch 自修复→重测→ALL PASSED；CDP SSE 网络通道为主检测源） |
-| 6 | 模型切换/状态管理 | 🔶 部分完成（`ci --resume/--continue` 断点续跑已实现并实测；跨模型切换待做） |
+| 6 | 模型切换/状态管理 | 🔶 大半完成：`--backend`/`/switch`/`/resume--continue`/跨模型交接（含思考过程移交）已实现并有回归；MiMo 登录后实机验证待做 |
 | 7 | 界面/打包/完整文档 | 未开始 |
 
 ## 已知限制

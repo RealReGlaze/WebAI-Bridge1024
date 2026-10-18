@@ -6,6 +6,7 @@ import { rmSync, existsSync, readFileSync } from 'node:fs';
 import path from 'node:path';
 import { parseReply, buildToolResultMessage, buildRetryMessage } from '../src/protocol.js';
 import { DeepSeekWebAdapter } from '../src/adapters/DeepSeekWebAdapter.js';
+import { buildResumeMessage, type AgentRoundLog, type AgentSessionState } from '../src/runtime/agent.js';
 import { applyPatch, runCommand, defaultTools } from '../src/tools/index.js';
 import { resolveSandboxPath, DEFAULT_POLICY } from '../src/tools/policy.js';
 import type { ToolContext } from '../src/tools/index.js';
@@ -233,6 +234,42 @@ function main() {
     sse2.text === '⟦TOOLCALL⟧ ABCDEF' && /FINISHED/.test(sse2.status)
       ? pass('SSE 解析（-1 锚点+续写简写）')
       : fail('SSE 解析（-1 锚点+续写简写）', JSON.stringify(sse2));
+
+    // 跨模型交接：切换后端时 buildResumeMessage 输出交接段（原后端/新后端/思考片段）
+    const handoverSession = {
+      sessionId: 't-handover-test',
+      goal: '修复冒烟测试',
+      workspaceRoot: sandbox,
+      adapterId: 'deepseek',
+      status: 'stopped' as const,
+      startedAt: Date.now() - 1000,
+      updatedAt: Date.now(),
+      rounds: [
+        {
+          round: 1, sentChars: 800, replyChars: 500,
+          calls: [{ name: 'list_files', ok: true, digest: '.', output: 'f marker.txt (2B)' }],
+          finish: null, thinking: '先看目录里有什么。',
+        },
+        {
+          round: 2, sentChars: 300, replyChars: 200, calls: [],
+          finish: null, error: '用户手动停止', thinking: '还没写 marker，需要继续。',
+        },
+      ],
+      conversation: null,
+      transcript: [
+        { role: 'user' as const, text: '修复冒烟测试', timestamp: 0 },
+        { role: 'assistant' as const, text: '逐步推进。', thinking: '先 list_files。', timestamp: 1 },
+      ],
+      executedKeys: ['list_files::{"path":"."}'],
+    };
+    const cross = buildResumeMessage(handoverSession, 'mimo');
+    const same = buildResumeMessage(handoverSession, 'deepseek');
+    (/跨模型交接/.test(cross) && cross.includes('deepseek') && cross.includes('mimo') && cross.includes('思考片段'))
+      ? pass('跨模型交接消息（含原/新后端与思考片段）')
+      : fail('跨模型交接消息（含原/新后端与思考片段）', cross);
+    (!/跨模型交接/.test(same) && /续跑说明/.test(same))
+      ? pass('同后端续跑消息保持原样')
+      : fail('同后端续跑消息保持原样', same.slice(0, 200));
 
     console.log(process.exitCode ? '\n存在失败用例。' : '\n全部通过。');
     process.exit(process.exitCode ?? 0);

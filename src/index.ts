@@ -48,8 +48,14 @@ function pickBackend(cfgFile: ConfigFile, idOption?: string): BackendConfig {
     const enabled = (b as BackendConfig & { enabled?: boolean }).enabled !== false;
     return enabled;
   });
-  const chosen =
-    backends.find((b) => b.id === idOption) ?? backends.find((b) => b.adapterType === 'deepseek-web') ?? backends[0];
+  let chosen: BackendConfig | undefined;
+  if (idOption) {
+    const key = idOption.toLowerCase();
+    chosen =
+      backends.find((b) => b.id === idOption) ??
+      backends.find((b) => b.id.toLowerCase().includes(key) || b.displayName.toLowerCase().includes(key));
+  }
+  chosen = chosen ?? backends.find((b) => b.adapterType === 'deepseek-web') ?? backends[0];
   if (!chosen) throw new Error('config/backends.json 中没有可用的后端。');
   return chosen;
 }
@@ -115,16 +121,18 @@ async function executeTask(
 
 /** 无参交互模式：版本横幅 + >> 引导输入。工作目录 = 启动时的当前目录；ask/work 模式由模型自声明、轮数预算自动切换。 */
 async function runInteractive(restArgs: string[]): Promise<void> {
-  // 启动旗标：[-t 轮数] [--yes] [--debug] [-C 目录]（-C 相对路径基于用户命令行目录）
+  // 启动旗标：[-t 轮数] [--yes] [--debug] [-C 目录] [--backend 后端]（-C 相对路径基于用户命令行目录）
   let turns = 20;
   let auto = false;
   let workspaceRoot = INVOKED_CWD;
+  let backendChoice = process.env['BACKEND_ID'];
   for (let i = 0; i < restArgs.length; i++) {
     const a = restArgs[i]!;
     if (a === '--yes') auto = true;
     else if (a === '--debug') process.env['WEBAI_DEBUG'] = '1';
     else if (a === '-t' || a === '--turns' || a === '--max') turns = Math.min(Math.max(Number(restArgs[++i] ?? 20) || 20, 1), 50);
     else if (a === '-C' || a === '--dir') workspaceRoot = path.resolve(INVOKED_CWD, restArgs[++i] ?? '.');
+    else if (a === '--backend') backendChoice = restArgs[++i];
     else if (a) {
       console.error(`[interactive] 无法识别的参数：${a}（交互模式不带任务目标文本，goals 请用 ci 命令）`);
       process.exitCode = 1;
@@ -133,9 +141,9 @@ async function runInteractive(restArgs: string[]): Promise<void> {
   }
   const cfgFile = loadConfig();
   cfgFile.backends = normalize(cfgFile);
-  const backend = pickBackend(cfgFile, process.env['BACKEND_ID']);
-  const adapter = createAdapter(backend);
   const wf = cfgFile.defaults.waitForResponse;
+  const currentBackend = () => pickBackend(cfgFile, backendChoice);
+  const backend = currentBackend();
 
   console.log();
   console.log(`=========================================================================`);
@@ -143,7 +151,7 @@ async function runInteractive(restArgs: string[]): Promise<void> {
   console.log(`  WebAI Bridge v${VERSION}   后端：${backend.displayName}（${backend.id}）`);
   console.log(`  工作目录：${workspaceRoot}`);
   console.log(`  模式自动切换：模型首轮声明 <mode>ask</mode>（快问快答/3 轮）或 <mode>work</mode>（正式任务/${turns} 轮）`);
-  console.log('  输入任务目标后回车即执行；/tasks 列表 · /show <ID> 详情 · /auto on|off 审批 · /accept-all 全部允许 · /exit 退出');
+  console.log('  输入任务目标后回车即执行；/tasks · /show <ID> · /auto on|off · /accept-all · /switch [后端] · /continue [ID] · /exit');
   console.log(`=========================================================================`);
   if (auto) console.log('  [--yes] 高风险操作自动放行。');
   console.log();
@@ -182,11 +190,76 @@ async function runInteractive(restArgs: string[]): Promise<void> {
       continue;
     }
     if (/^\/help\b/i.test(line)) {
-      console.log('命令：/tasks 任务列表 · /show <ID> [--transcript] 任务详情 · /auto on|off 自动审批 · /accept-all 全部允许（二次确认） · /exit 退出');
+      console.log('命令：/tasks 任务列表 · /show <ID> [--transcript] 任务详情 · /auto on|off 自动审批 · /accept-all 全部允许（二次确认） · /switch [后端] 切换模型（跨模型交接见 /continue） · /continue [ID] 续跑未完成任务 · /exit 退出');
       continue;
     }
-    if (line.startsWith('/')) {
-      console.log('未知命令（/tasks /show /auto /accept-all /help /exit）');
+    if (/^\/switch\b/i.test(line)) {
+      const m = /^\/switch\s+(\S+)\s*$/i.exec(line);
+      if (!m) {
+        console.log('可用后端：' + cfgFile.backends.filter((b) => (b as BackendConfig & { enabled?: boolean }).enabled !== false).map((b) => `${b.displayName}（${b.id}）`).join('，'));
+        console.log('用法：/switch <后端id>（对下一个任务生效；跨模型续跑用 /continue）');
+        continue;
+      }
+      try {
+        const key = m[1]!.toLowerCase();
+        const hit = cfgFile.backends.find(
+          (b) =>
+            (b as BackendConfig & { enabled?: boolean }).enabled !== false &&
+            (b.id === m[1] || b.id.toLowerCase().includes(key) || b.displayName.toLowerCase().includes(key)),
+        );
+        if (!hit) throw new Error('not-found');
+        backendChoice = hit.id;
+        console.log(`[后端] 已切换：${hit.displayName}（${hit.id}）——对下一个任务的新对话生效。`);
+      } catch {
+        console.log(`[后端] 没有匹配「${m[1]}」的已启用后端。可用：${cfgFile.backends.filter((b) => (b as BackendConfig & { enabled?: boolean }).enabled !== false).map((b) => b.id).join('，')}`);
+      }
+      continue;
+    }
+    if (/^\/continue\b/i.test(line)) {
+      const m = /^\/continue(?:\s+(\S+))?\s*$/i.exec(line);
+      if (!m) continue;
+      const tasksDir = path.join(ROOT, '.runtime', 'tasks');
+      if (!existsSync(tasksDir)) {
+        console.log('（暂无任务会话，无可续跑）');
+        continue;
+      }
+      const all = readdirSync(tasksDir)
+        .filter((f) => f.endsWith('.json'))
+        .map((f) => {
+          try {
+            return JSON.parse(readFileSync(path.join(tasksDir, f), 'utf-8')) as AgentSessionState;
+          } catch {
+            return null;
+          }
+        })
+        .filter((s): s is AgentSessionState => !!s && path.resolve(s.workspaceRoot) === path.resolve(workspaceRoot));
+      const target = m[1]
+        ? all.find((s) => s.sessionId === m[1])
+        : all.filter((s) => s.status !== 'finished').sort((x, y) => y.updatedAt - x.updatedAt)[0];
+      if (!target) {
+        console.log(m[1] ? `未找到任务 ${m[1]}` : '当前工作区没有未完成的任务（全部已完成）。');
+        continue;
+      }
+      if (target.status === 'finished') {
+        console.log(`任务 ${target.sessionId} 已完成，无需续跑（重做请直接发新任务）。`);
+        continue;
+      }
+      const backend2 = currentBackend();
+      console.log(`[continue] 续跑 ${target.sessionId}（${target.status}，${target.rounds.length} 轮）→ 后端 ${backend2.displayName}${target.adapterId !== backend2.id ? '（跨模型交接：原后端 ' + target.adapterId + '）' : ''}`);
+      try {
+        await executeTask(createAdapter(backend2), wf, {
+          goal: target.goal,
+          workspaceRoot,
+          maxRounds: turns,
+          autoApprove: auto,
+          backendName: backend2.displayName,
+          resumeSession: target,
+        });
+      } catch (e) {
+        console.error('[continue] 任务执行异常：', e);
+      } finally {
+        clearQueuedLines();
+      }
       continue;
     }
     if (/^\/tasks$/i.test(line)) {
@@ -219,14 +292,20 @@ async function runInteractive(restArgs: string[]): Promise<void> {
       console.log(`（轮次详情与 /transcript 见 start -- show ${s.sessionId} --transcript）`);
       continue;
     }
+    if (line.startsWith('/')) {
+      console.log('未知命令（/tasks /show /auto /accept-all /switch /continue /help /exit）');
+      continue;
+    }
     // 任务执行：行读取已在工具确认间放开（一次性接口），无需 pause/resume
     try {
-      await executeTask(adapter, wf, {
+      const backendForTask = currentBackend();
+      const adapterForTask = createAdapter(backendForTask);
+      await executeTask(adapterForTask, wf, {
         goal: line,
         workspaceRoot,
         maxRounds: turns,
         autoApprove: auto,
-        backendName: backend.displayName,
+        backendName: backendForTask.displayName,
       });
     } catch (e) {
       console.error('[interactive] 任务执行异常：', e);
@@ -263,15 +342,24 @@ async function main() {
   start -- browser/status/probe 连接、状态、页面结构诊断
   start -- list                 列出本地任务会话（.runtime/tasks）
   start -- show <ID> [--transcript]  查看某任务的轮次/总结/完整成果（嵌套被拦后成果不会失踪）
-  交互模式命令：/tasks · /show · /auto on|off（自动审批开关，自下一个任务新对话生效）· /accept-all（全部允许，需二次确认）· /help · /exit
+  交互模式命令：/tasks · /show · /auto on|off（自动审批开关，自下一个任务新对话生效）· /accept-all（全部允许，需二次确认）· /switch [后端]（切换模型）· /continue [ID]（续跑/跨模型交接）· /help · /exit
 启动器：项目 bin/webai.cmd（任意目录调用，如 webai.cmd ci "修复所有测试" -C E:\\proj）
-可用 BACKEND_ID 环境变量指定后端 id；WEBAI_DEBUG=1 输出回复等待诊断。`);
+可用 BACKEND_ID 环境变量或 --backend <后端> 指定后端 id；WEBAI_DEBUG=1 输出回复等待诊断。`);
     return;
   }
 
   const cfgFile = loadConfig();
   cfgFile.backends = normalize(cfgFile);
-  const backend = pickBackend(cfgFile, process.env['BACKEND_ID']);
+  // 全局旗标 --backend <后端id|名称>（优先于 BACKEND_ID 环境变量；对所有子命令生效）
+  let backendChoice = process.env['BACKEND_ID'];
+  for (let i = 0; i < rest.length; i++) {
+    if (rest[i] === '--backend') {
+      backendChoice = rest[i + 1] ?? '';
+      rest.splice(i, 2);
+      i--;
+    }
+  }
+  const backend = pickBackend(cfgFile, backendChoice);
   console.log(`[cli] 后端：${backend.displayName}（${backend.id}，${backend.adapterType}）`);
   const adapter = createAdapter(backend);
 
@@ -456,6 +544,7 @@ async function main() {
         if (a === '--yes') flags['yes'] = true;
         else if (a === '--continue') flags['continue'] = true;
         else if (a === '--debug') flags['debug'] = true;
+        else if (a === '--backend') { flags['backend'] = rest[++i] ?? ''; }
         else if (a === '--resume') { flags['resume'] = rest[++i] ?? ''; }
         else if (a === '-C' || a === '--dir') { flags['dir'] = rest[++i] ?? '.'; }
         else if (a === '--max-turns' || a === '-t' || a === '--max') { flags['turns'] = rest[++i] ?? ''; }

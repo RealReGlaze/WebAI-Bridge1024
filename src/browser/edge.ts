@@ -48,34 +48,48 @@ async function isCdpAlive(port: number): Promise<boolean> {
   }
 }
 
-/** 启动专用 Edge 实例（幂等：若该端口已有调试实例则直接复用）。返回是否新启动。 */
+/** 启动专用 Edge 实例（幂等：若该端口已有调试实例则直接复用）。返回是否新启动。
+ *  注意：实测 spawn 偶发出现「进程在但调试端口不开」（冷启动/更新冲突时）；失败自动重试一次。 */
 export async function launchEdge(opts: EdgeLaunchOptions): Promise<boolean> {
   if (await isCdpAlive(opts.debugPort)) {
     console.log(`[edge] 端口 ${opts.debugPort} 已存在调试实例，直接复用。`);
     return false;
   }
-  mkdirSync(opts.userDataDir, { recursive: true });
-  const exe = detectEdgePath(opts.executablePath);
-  const args = [
-    `--remote-debugging-port=${opts.debugPort}`,
-    `--user-data-dir=${opts.userDataDir}`,
-    '--no-first-run',
-    '--no-default-browser-check',
-    '--disable-features=msEdgeReginaBadging', // 减少首次运行干扰提示（可选特性）
-    '--window-size=1400,950',
-    opts.startUrl,
-  ];
-  const child = spawn(exe, args, { detached: true, stdio: 'ignore' });
-  child.unref();
-  // 等待 CDP 端口就绪
-  for (let i = 0; i < 40; i++) {
-    await new Promise((r) => setTimeout(r, 500));
-    if (await isCdpAlive(opts.debugPort)) {
-      console.log(`[edge] 已启动专用 Edge（pid=${child.pid}，端口=${opts.debugPort}，profile=${path.basename(opts.userDataDir)}）。`);
-      return true;
+  for (let attempt = 1; attempt <= 2; attempt++) {
+    const userDataDir = path.resolve(opts.userDataDir); // 相对路径防 cwd 漂移
+    mkdirSync(userDataDir, { recursive: true });
+    const exe = detectEdgePath(opts.executablePath);
+    const args = [
+      `--remote-debugging-port=${opts.debugPort}`,
+      `--user-data-dir=${userDataDir}`,
+      '--no-first-run',
+      '--no-default-browser-check',
+      '--disable-features=msEdgeReginaBadging', // 减少首次运行干扰提示（可选特性）
+      '--window-size=1400,950',
+      opts.startUrl,
+    ];
+    const child = spawn(exe, args, { detached: true, stdio: 'ignore' });
+    child.unref();
+    // 等待 CDP 端口就绪（最多 20s）
+    for (let i = 0; i < 40; i++) {
+      await new Promise((r) => setTimeout(r, 500));
+      if (await isCdpAlive(opts.debugPort)) {
+        console.log(`[edge] 已启动专用 Edge（pid=${child.pid}，端口=${opts.debugPort}，profile=${path.basename(userDataDir)}）。`);
+        return true;
+      }
+    }
+    if (attempt === 1) {
+      console.log(`[edge] 首次启动未出现调试端口（pid=${child.pid}），重试一次…`);
+      // 结束可能僵住的该实例再试
+      try {
+        process.kill(child.pid!, 'SIGKILL');
+      } catch {
+        /* 忽略 */
+      }
+      await new Promise((r) => setTimeout(r, 3000));
     }
   }
-  throw new Error(`Edge 已启动但 ${opts.debugPort / 1000}s 内未出现 CDP 调试端口，请检查端口占用。`);
+  throw new Error(`Edge 已启动但 ${opts.debugPort} 端口始终未出现 CDP 调试服务（已重试）。请手动关闭同名 profile 的 Edge 窗口后再试。`);
 }
 
 /** 附加到该实例（必须先 launchEdge） */

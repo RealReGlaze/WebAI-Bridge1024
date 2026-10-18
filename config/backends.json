@@ -26,6 +26,23 @@
       "notes": "选择器于 2026-10-18 实测校准（登录后：input 无 id、name=search）"
     },
     {
+      "id": "mimo",
+      "displayName": "小米 MiMo 网页版",
+      "startUrl": "https://aistudio.xiaomimimo.com/#/c",
+      "adapterType": "mimo-web",
+      "browser": {
+        "debugPort": 9225,
+        "profileDir": ".runtime/edge-profile-mimo"
+      },
+      "enabled": true,
+      "capabilities": {
+        "multiTurnConversation": true,
+        "attachments": null,
+        "streaming": true
+      },
+      "notes": "2026-10-18 校准（未登录态）：输入框=textarea（占位符「登录后可继续聊天」），登录指示=未登录/立即登录。首次使用需在专用 Edge 窗口手动登录小米账号。"
+    },
+    {
       "id": "qianwen",
       "displayName": "千问网页版",
       "startUrl": "https://www.qianwen.com/",
