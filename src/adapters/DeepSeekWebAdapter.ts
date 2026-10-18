@@ -296,16 +296,18 @@ export class DeepSeekWebAdapter extends IModelAdapter {
   private async detectLogin(): Promise<'ok' | 'login' | 'unknown'> {
     if (!this.page) return 'unknown';
     const input = this.page.locator(this.sel.input).first();
-    try {
-      await input.waitFor({ state: 'visible', timeout: 20_000 });
-      return 'ok';
-    } catch {
+    // 冷启动时 SPA 渲染可能超过 20s；轮询至多 60s，期间每 3s 复查
+    const deadline = Date.now() + 60_000;
+    for (;;) {
+      if (await input.isVisible().catch(() => false)) return 'ok';
       const loginBtn = await this.page
         .locator(this.sel.loginIndicator)
         .first()
         .isVisible()
         .catch(() => false);
-      return loginBtn ? 'login' : 'unknown';
+      if (loginBtn) return 'login';
+      if (Date.now() + 3_000 > deadline) return 'unknown';
+      await new Promise((r) => setTimeout(r, 3_000));
     }
   }
 

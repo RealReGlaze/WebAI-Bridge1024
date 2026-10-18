@@ -8,6 +8,7 @@
  * 每轮任务状态持久化到 .runtime/tasks/<sessionId>.json，供恢复与跨模型交接。
  */
 import { mkdirSync, writeFileSync } from 'node:fs';
+import { createInterface } from 'node:readline';
 import path from 'node:path';
 import { IModelAdapter, type WaitForResponseOptions, type WebConversationState, type ChatTurn } from '../adapters/IModelAdapter.js';
 import { defaultTools, type Tool, type ToolContext, type ToolOutput } from '../tools/index.js';
@@ -331,20 +332,59 @@ export class AgentLoop {
   }
 }
 
-/** CLI y/n 确认（readline） */
-function confirmPrompt(q: string): Promise<boolean> {
-  return new Promise((resolve) => {
-    process.stdout.write(q);
-    let data = '';
-    const onData = (d: Buffer) => {
-      data += d.toString();
-      if (data.includes('\n')) {
-        process.stdin.removeListener('data', onData);
-        resolve(/^\s*y(es)?\s*$/i.test(data));
-      }
-    };
-    process.stdin.on('data', onData);
+/** 进程级单排行队列：stdin 只由一个 readline 接口持有，行写入队列；读取方按序取行。
+ *  REPL 的 >> 输入与工具 y/N 确认共用此队列（修复：多接口下管道 EOF 抢先 close、确认无法输入的问题）。 */
+let rlSingleton: ReturnType<typeof createInterface> | null = null;
+/** 等待下一行的读取方（同一时刻至多一个：REPL 输入或工具确认） */
+let waiter: ((l: string | null) => void) | null = null;
+/** 是否已读到流结束（真管道 EOF / Ctrl+C）；之后的读取立即返回 null */
+let stdinExhausted = false;
+/** 先于读取方到达的行缓冲 */
+const queuedLines: string[] = [];
+
+function ensureStdinReader(): void {
+  if (rlSingleton) return;
+  rlSingleton = createInterface({ input: process.stdin, output: process.stdout, terminal: !!process.stdin.isTTY });
+  rlSingleton.on('line', (l: string) => {
+    if (waiter) {
+      const w = waiter;
+      waiter = null;
+      w(l);
+    } else {
+      queuedLines.push(l);
+    }
   });
+  rlSingleton.on('close', () => {
+    stdinExhausted = true;
+    if (waiter) {
+      const w = waiter;
+      waiter = null;
+      w(null);
+    }
+  });
+}
+
+/** 清空缓冲的未消费行（REPL 任务结束后调用：上一个任务的 y/n 残留不再作为新目标） */
+export function clearQueuedLines(): void {
+  queuedLines.length = 0;
+}
+
+/** 一次性行读取：REPL 的 >> 输入与工具 y/N 确认共用。EOF/Ctrl+C 返回 null。 */
+export function readLineOnce(q: string): Promise<string | null> {
+  ensureStdinReader();
+  const queued = queuedLines.shift();
+  if (queued !== undefined) return Promise.resolve(queued);
+  if (stdinExhausted) return Promise.resolve(null);
+  return new Promise((resolve) => {
+    waiter = resolve;
+    process.stdout.write(q);
+  });
+}
+
+/** 工具确认 y/N：从同一 stdin 行队列读取（修复交互模式下确认无法输入的问题） */
+async function confirmPrompt(q: string): Promise<boolean> {
+  const answer = await readLineOnce(q);
+  return !!answer && /^\s*y(es)?\s*$/i.test(answer);
 }
 
 /** 调用参数的简短摘要（日志/续跑上下文用）：优先人类可读键 */

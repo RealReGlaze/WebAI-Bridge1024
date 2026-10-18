@@ -14,10 +14,9 @@
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { createInterface } from 'node:readline';
 import { createAdapter } from './adapters/factory.js';
 import type { BackendConfig, IModelAdapter } from './adapters/IModelAdapter.js';
-import { AgentLoop, type AgentSessionState } from './runtime/agent.js';
+import { AgentLoop, clearQueuedLines, readLineOnce, type AgentSessionState } from './runtime/agent.js';
 import { existsSync, mkdirSync, readdirSync } from 'node:fs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -139,21 +138,20 @@ async function runInteractive(restArgs: string[]): Promise<void> {
   const wf = cfgFile.defaults.waitForResponse;
 
   console.log();
+  console.log(`=========================================================================`);
+  console.log(`                     Welcome to WebAI Bridge CLI!`);
   console.log(`  WebAI Bridge v${VERSION}   后端：${backend.displayName}（${backend.id}）`);
   console.log(`  工作目录：${workspaceRoot}`);
   console.log(`  模式自动切换：模型首轮声明 <mode>ask</mode>（快问快答/3 轮）或 <mode>work</mode>（正式任务/${turns} 轮）`);
   console.log('  输入任务目标后回车即执行；/tasks 列表 · /show <ID> 详情 · /exit 退出');
+  console.log(`=========================================================================`);
   if (auto) console.log('  [--yes] 高风险操作自动放行。');
   console.log();
 
-  const rl = createInterface({ input: process.stdin, output: process.stdout, prompt: '>> ' });
-  const askLine = (): Promise<string | null> =>
-    new Promise((resolve) => {
-      rl.once('line', (line: string) => resolve(line.trim()));
-      rl.once('close', () => resolve(null));
-      rl.prompt();
-    });
+  // 行输入全部走一次性 readline（与工具 y/N 确认互不抢占 stdin）
+  const askLine = (): Promise<string | null> => readLineOnce('>> ');
   for (;;) {
+    console.log();
     const line = await askLine();
     if (line === null) break; // EOF / Ctrl+C
     if (!line) continue;
@@ -188,8 +186,7 @@ async function runInteractive(restArgs: string[]): Promise<void> {
       console.log(`（轮次详情与 /transcript 见 start -- show ${s.sessionId} --transcript）`);
       continue;
     }
-    // 任务执行：暂停行读取，避免与工具 y/n 确认抢 stdin
-    rl.pause();
+    // 任务执行：行读取已在工具确认间放开（一次性接口），无需 pause/resume
     try {
       await executeTask(adapter, wf, {
         goal: line,
@@ -200,11 +197,12 @@ async function runInteractive(restArgs: string[]): Promise<void> {
       });
     } catch (e) {
       console.error('[interactive] 任务执行异常：', e);
+    } finally {
+      // 该任务的预喂行已用尽：清掉缓冲中残留的（如多余的 y/确认行），避免被误当下一个目标
+      clearQueuedLines();
     }
-    rl.resume();
     console.log();
   }
-  rl.close();
   console.log('[interactive] 已退出。');
 }
 
