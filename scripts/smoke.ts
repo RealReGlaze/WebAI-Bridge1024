@@ -171,6 +171,12 @@ function main() {
       !patchArg.includes('⟦');
     multilineOk ? pass('多行参数内容保真（自适应解析后）') : fail('多行参数内容保真（自适应解析后）', JSON.stringify(patchArg));
 
+    // 17d. 模式自声明解析（ask/work）
+    const modeParsed = parseReply('<mode>ask</mode>\n答案是 4。', defaultTools);
+    const modeWork = parseReply('[MODE: work]\n嗯。', defaultTools);
+    const modeOk = modeParsed.mode === 'ask' && modeWork.mode === 'work';
+    modeOk ? pass('模式自声明解析（<mode>/[MODE:]）') : fail('模式自声明解析（<mode>/[MODE:]）', `ask=${modeParsed.mode} work=${modeWork.mode}`);
+
     // 18. 真实 SSE 样本回归（2026-10-18 实测抓包）
     const sseSample = [
       'event: ready',

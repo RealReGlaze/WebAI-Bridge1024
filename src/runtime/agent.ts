@@ -183,14 +183,26 @@ export class AgentLoop {
     const systemMsg = buildSystemMessage(options.goal, options.workspaceRoot);
     let message = resumed ? buildResumeMessage(this.session) : systemMsg;
 
-    for (let round = startRound + 1; round <= startRound + options.maxRounds; round++) {
+    // 动态轮数预算：hard cap = options.maxRounds；
+    // ask 模式（模型在首轮自声明 <mode>ask</mode>）收缩到 3 轮，work 按原预算走。
+    let remaining = options.maxRounds;
+    let round = startRound;
+    for (;;) {
       if (options.shouldStop?.()) {
         this.session.status = 'stopped';
         this.session.summary = '用户手动停止。';
         this.saveSession();
         return this.session;
       }
-
+      if (remaining <= 0) {
+        this.session.status = 'failed';
+        this.session.summary = `达到最大轮数 ${this.session.rounds.length - startRound}。`;
+        this.saveSession();
+        console.log(`[agent] 总结轨迹：达到本轮预算上限。`);
+        return this.session;
+      }
+      remaining--;
+      round++;
       const snap = (await this.adapter.getConversationState()).assistantMessageCount;
       const chatFp = await this.adapter.captureChatFingerprint();
       const netBaseline = await this.adapter.captureNetBaseline();
@@ -221,6 +233,8 @@ export class AgentLoop {
       this.session.transcript.push({ role: 'assistant', text, timestamp: Date.now() });
 
       const parsed = parseReply(text);
+      // 模式自声明：ask 快问快答 → 收缩剩余轮数预算
+      if (parsed.mode === 'ask') remaining = Math.min(remaining, 3);
       // 防重放：已经在本地真实执行过的调用签名直接跳过（登记发生在执行之后）
       const freshCalls: Array<{ name: string; args: Record<string, unknown> }> = [];
       for (const c of parsed.calls) {
@@ -314,11 +328,6 @@ export class AgentLoop {
         message += `\n\n另注：本次回复中以下片段协议校验失败，未执行（若非你本意的调用可忽略本条；若是你的调用请重发完整块）：\n${parsed.errors.join('\n')}`;
       }
     }
-
-    this.session.status = 'failed';
-    this.session.summary = `达到最大轮数 ${options.maxRounds}。`;
-    this.saveSession();
-    return this.session;
   }
 }
 

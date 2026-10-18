@@ -21,6 +21,8 @@ export interface ParsedReply {
   finish: string | null;
   /** 解析/校验失败信息（需要反馈给模型重发） */
   errors: string[];
+  /** 模型自声明的工作模式（首选回复内 <mode>ask|work</mode> 或 [MODE:ask]） */
+  mode?: 'ask' | 'work';
 }
 
 /** 标准块围栏（```toolcall）作为后备入口 */
@@ -91,7 +93,13 @@ export function buildSystemMessage(goal: string, workspaceRoot: string, tools: T
     '8. 严格禁止用 run_command 启动 webai/webai.cmd 本身或任何嵌套 Agent 任务（会被环境守卫拒绝）。',
     '   了解目录/文件用 list_files 与 read_file 即可，不需要也不允许递归调用本系统。',
     '',
-    '现在开始：先了解任务与工作区（可用 list_files / read_file），然后执行目标。',
+    '# 工作模式（首轮回复必须先声明）',
+    '首轮回复第一行声明：<mode>ask</mode> 或 <mode>work</mode>',
+    '- ask：一次性问答/查询/分析（1~3 个输入就能答完的任务；优先直接给结论，最多两小批调用）。',
+    '- work：需要多轮创建/修改/构建/测试的实际执行任务。',
+    '声明后按对应节律推进：ask 快进快出，work 稳步多轮。声明只需一次。',
+    '',
+    '现在开始：先声明工作模式，然后了解任务与工作区（可用 list_files / read_file），再执行目标。',
   ].join('\n');
 }
 
@@ -245,6 +253,11 @@ export function parseReply(text0: string, tools: Tool[] = defaultTools): ParsedR
   const calls: ToolCall[] = [];
   let finish: string | null = null;
 
+  // 工作模式自声明：<mode>ask|work</mode>（首选）或 [MODE:ask]（宽松）
+  let mode: 'ask' | 'work' | undefined;
+  const modeM = /<mode>\s*(ask|work)\s*<\/mode>/i.exec(text) ?? /\[MODE[:：]\s*(ask|work)\s*\]/i.exec(text);
+  if (modeM) mode = modeM[1]!.toLowerCase() as 'ask' | 'work';
+
   const finishIdx = text.indexOf(FINISH_START);
   if (finishIdx !== -1) {
     const endIdx = text.indexOf(FINISH_END, finishIdx);
@@ -287,7 +300,7 @@ export function parseReply(text0: string, tools: Tool[] = defaultTools): ParsedR
     if (call) calls.push(call);
   }
 
-  return { calls, finish, errors };
+  return { calls, finish, errors, mode };
 }
 
 export function buildToolResultMessage(results: Array<{ name: string; result: ToolOutput }>): string {

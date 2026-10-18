@@ -14,10 +14,25 @@ Windows 本地系统：用您已正常登录的网页 AI（DeepSeek / 千问等�
 
 ## 使用
 
-**启动器（推荐，任意目录可用）**：项目自带 `bin/webai.cmd`，等价于在项目根运行 CLI：
+**交互模式（推荐，任意目录可用）**：项目自带 `bin/webai.cmd`，无参启动进入 Claude 式交互界面：
 
 ```powershell
-# Claude Code 风格一键任务：默认在【当前目录】工作，完成=退出码 0
+webai.cmd                        # 横幅显示版本/工作目录（=启动时的目录），>> 输入任务目标
+webai.cmd --yes -t 20            # 高风险自动放行；轮数预算 20
+```
+
+- 每次在 `>>` 后输入任务目标回车即执行一个任务，可连续多轮交互。
+- **工作模式由模型自判定**：模型在首轮回复声明 `<mode>ask</mode>`（快问快答，轮数预算自动收缩为 3 轮）或 `<mode>work</mode>`（正式执行任务，按启动预算走）。
+- 内置命令：`/tasks` 任务列表 · `/show <ID>` 任务详情 · `/exit` 退出。
+- 键盘输入中文正常；若脚本管道喂入中文请先把宿主 pipe 编码设为 UTF-8（PowerShell 5.1 默认对原生程序管道用 ASCII，会把中文变 `?`）：
+  ```powershell
+  $OutputEncoding=[Console]::InputEncoding=[Console]::OutputEncoding=[System.Text.UTF8Encoding]::new()
+  "任务目标" | webai.cmd --yes
+  ```
+
+**一键（CI 式）用法**：
+
+```powershell
 E:\...\WebAPI\bin\webai.cmd ci "修复所有失败的测试"                 # -t 20 --yes 可选
 E:\...\WebAPI\bin\webai.cmd ci "实现XX功能" -C E:\proj\myapp       # 指定工作区
 E:\...\WebAPI\bin\webai.cmd ci --continue                          # 恢复同工作区最近未完成任务

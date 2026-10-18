@@ -14,8 +14,9 @@
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { createInterface } from 'node:readline';
 import { createAdapter } from './adapters/factory.js';
-import type { BackendConfig } from './adapters/IModelAdapter.js';
+import type { BackendConfig, IModelAdapter } from './adapters/IModelAdapter.js';
 import { AgentLoop, type AgentSessionState } from './runtime/agent.js';
 import { existsSync, mkdirSync, readdirSync } from 'node:fs';
 
@@ -28,6 +29,10 @@ interface ConfigFile {
   };
   backends: BackendConfig[];
 }
+
+/** 版本号取自 package.json（--version 与交互横幅显示） */
+const VERSION: string =
+  (JSON.parse(readFileSync(path.join(ROOT, 'package.json'), 'utf-8')) as { version?: string }).version ?? '0.0.0';
 
 function loadConfig(): ConfigFile {
   return JSON.parse(readFileSync(CONFIG_PATH, 'utf-8')) as ConfigFile;
@@ -59,11 +64,157 @@ function normalize(cfgFile: ConfigFile): BackendConfig[] {
   }));
 }
 
-async function main() {
-  const [, , cmd, ...rest] = process.argv;
-  const backendId = process.env['BACKEND_ID'];
+/** 任务执行核心：连接 → 新会话 → 循环 → 汇报。供 ci 命令与交互模式复用。 */
+async function executeTask(
+  adapter: IModelAdapter,
+  wf: { totalTimeoutMs: number; stablePolls: number; pollIntervalMs: number },
+  params: {
+    goal: string;
+    workspaceRoot: string;
+    maxRounds: number;
+    autoApprove: boolean;
+    backendName?: string;
+    resumeSession?: AgentSessionState;
+  },
+): Promise<{ ok: boolean; session: AgentSessionState | null }> {
+  const conn = await adapter.connect();
+  if (!conn.ok) {
+    console.error(`[ci] 连接失败：${conn.code} ${conn.message}`);
+    return { ok: false, session: null };
+  }
+  const loop = new AgentLoop(adapter, {
+    goal: params.resumeSession ? params.resumeSession.goal : params.goal,
+    workspaceRoot: params.workspaceRoot,
+    maxRounds: params.maxRounds,
+    autoApprove: params.autoApprove,
+    resumeSession: params.resumeSession,
+    waitFor: {
+      baselineAssistantCount: 0,
+      totalTimeoutMs: wf.totalTimeoutMs,
+      stablePolls: wf.stablePolls,
+      pollIntervalMs: wf.pollIntervalMs,
+      rejectPatterns: ['服务繁忙', '请稍后再试', '访问被拒绝'],
+    },
+  });
+  console.log(
+    `[ci] 任务=${loop.sessionId} 工作区=${params.workspaceRoot} 后端=${params.backendName ?? '网页模型'} 本轮上限=${params.maxRounds}轮${params.autoApprove ? ' 自动放行' : ''}`,
+  );
+  // 注入会话标识环境变量：run_command 派生的孙进程（含 webai 自身）将因 WEBAI_AGENT_SESSION 被拒
+  process.env['WEBAI_AGENT_SESSION'] = loop.sessionId;
+  const done = await loop.run();
+  delete process.env['WEBAI_AGENT_SESSION'];
+  console.log(`[ci] 结束：${done.status}（${done.rounds.length} 轮）`);
+  if (done.summary) console.log(`[ci] 总结：${done.summary}`);
+  return { ok: done.status === 'finished', session: done };
+}
 
-  if (!cmd || ['help', '--help', '-h'].includes(cmd)) {
+/** 无参交互模式：版本横幅 + >> 引导输入。工作目录 = 启动时的当前目录；ask/work 模式由模型自声明、轮数预算自动切换。 */
+async function runInteractive(restArgs: string[]): Promise<void> {
+  // 启动旗标：[-t 轮数] [--yes] [--debug] [-C 目录]
+  let turns = 20;
+  let auto = false;
+  let workspaceRoot = process.cwd();
+  for (let i = 0; i < restArgs.length; i++) {
+    const a = restArgs[i]!;
+    if (a === '--yes') auto = true;
+    else if (a === '--debug') process.env['WEBAI_DEBUG'] = '1';
+    else if (a === '-t' || a === '--turns' || a === '--max') turns = Math.min(Math.max(Number(restArgs[++i] ?? 20) || 20, 1), 50);
+    else if (a === '-C' || a === '--dir') workspaceRoot = path.resolve(process.cwd(), restArgs[++i] ?? '.');
+    else if (a) {
+      console.error(`[interactive] 无法识别的参数：${a}（交互模式不带任务目标文本，goals 请用 ci 命令）`);
+      process.exitCode = 1;
+      return;
+    }
+  }
+  const cfgFile = loadConfig();
+  cfgFile.backends = normalize(cfgFile);
+  const backend = pickBackend(cfgFile, process.env['BACKEND_ID']);
+  const adapter = createAdapter(backend);
+  const wf = cfgFile.defaults.waitForResponse;
+
+  console.log();
+  console.log(`  WebAI Bridge v${VERSION}   后端：${backend.displayName}（${backend.id}）`);
+  console.log(`  工作目录：${workspaceRoot}`);
+  console.log(`  模式自动切换：模型首轮声明 <mode>ask</mode>（快问快答/3 轮）或 <mode>work</mode>（正式任务/${turns} 轮）`);
+  console.log('  输入任务目标后回车即执行；/tasks 列表 · /show <ID> 详情 · /exit 退出');
+  if (auto) console.log('  [--yes] 高风险操作自动放行。');
+  console.log();
+
+  const rl = createInterface({ input: process.stdin, output: process.stdout, prompt: '>> ' });
+  const askLine = (): Promise<string | null> =>
+    new Promise((resolve) => {
+      rl.once('line', (line: string) => resolve(line.trim()));
+      rl.once('close', () => resolve(null));
+      rl.prompt();
+    });
+  for (;;) {
+    const line = await askLine();
+    if (line === null) break; // EOF / Ctrl+C
+    if (!line) continue;
+    if (/^(\/exit|\/quit|exit|quit)$/i.test(line)) break;
+    if (/^\/tasks$/i.test(line)) {
+      const dir = path.join(ROOT, '.runtime', 'tasks');
+      if (!existsSync(dir)) {
+        console.log('（暂无任务）');
+        continue;
+      }
+      const files = readdirSync(dir).filter((f) => f.endsWith('.json'));
+      for (const f of files) {
+        try {
+          const s = JSON.parse(readFileSync(path.join(dir, f), 'utf-8')) as AgentSessionState;
+          console.log(`${s.sessionId} [${s.status}] ${s.goal.slice(0, 40)}${s.summary ? ` | ${s.summary.slice(0, 40)}` : ''}`);
+        } catch {
+          /* 忽略损坏文件 */
+        }
+      }
+      continue;
+    }
+    const m = /^\/show\s+(\S+)\s*(--transcript)?/i.exec(line);
+    if (m) {
+      const f = path.join(ROOT, '.runtime', 'tasks', `${m[1]}.json`);
+      if (!existsSync(f)) {
+        console.error(`[show] 未找到任务会话：${m[1]}`);
+        continue;
+      }
+      const s = JSON.parse(readFileSync(f, 'utf-8')) as AgentSessionState;
+      console.log(`任务 ${s.sessionId} [${s.status}] 目标：${s.goal}`);
+      if (s.summary) console.log(`总结 ${s.summary}`);
+      console.log(`（轮次详情与 /transcript 见 start -- show ${s.sessionId} --transcript）`);
+      continue;
+    }
+    // 任务执行：暂停行读取，避免与工具 y/n 确认抢 stdin
+    rl.pause();
+    try {
+      await executeTask(adapter, wf, {
+        goal: line,
+        workspaceRoot,
+        maxRounds: turns,
+        autoApprove: auto,
+        backendName: backend.displayName,
+      });
+    } catch (e) {
+      console.error('[interactive] 任务执行异常：', e);
+    }
+    rl.resume();
+    console.log();
+  }
+  rl.close();
+  console.log('[interactive] 已退出。');
+}
+
+async function main() {
+  const [, , cmd0, ...rest] = process.argv;
+
+  if (cmd0 === '--version' || cmd0 === '-v') {
+    console.log(`WebAI Bridge v${VERSION}`);
+    return;
+  }
+  // 无参（或只带 -t/--yes 等旗标）启动 → 交互模式（Claude 式：版本横幅 + >> 引导输入；工作目录=当前目录）
+  if (!cmd0 || cmd0.startsWith('-')) {
+    await runInteractive(cmd0 ? [cmd0, ...rest] : rest);
+    return;
+  }
+  if (['help', '--help', '-h'].includes(cmd0)) {
     console.log(`WebAI Bridge CLI —— 类 Claude Code 的本地 AI Agent 命令行
   webai ci "任务目标" [-C 目录] [-t 轮数] [--yes] [--resume ID | --continue]
                                      一键任务闭环（默认在当前目录工作，完成=退出码0）
@@ -82,11 +233,11 @@ async function main() {
 
   const cfgFile = loadConfig();
   cfgFile.backends = normalize(cfgFile);
-  const backend = pickBackend(cfgFile, backendId);
+  const backend = pickBackend(cfgFile, process.env['BACKEND_ID']);
   console.log(`[cli] 后端：${backend.displayName}（${backend.id}，${backend.adapterType}）`);
   const adapter = createAdapter(backend);
 
-  switch (cmd) {
+  switch (cmd0) {
     case 'browser': {
       const r = await adapter.connect();
       if (r.ok) {
@@ -187,7 +338,7 @@ async function main() {
         return;
       }
       const st = await adapter.getConversationState();
-      if (cmd === 'state') {
+      if (cmd0 === 'state') {
         console.log(JSON.stringify(st, null, 2));
         return;
       }
@@ -258,7 +409,7 @@ async function main() {
     }
     case 'ci':
     case 'agent': {
-      const ci = cmd === 'ci';
+      const ci = cmd0 === 'ci';
       // 解析参数：非旗标 token 视作目标语句（Claude Code 风格）；-C/--dir 指定工作区
       const goalWords: string[] = [];
       const flags: Record<string, string | boolean> = {};
@@ -354,41 +505,20 @@ async function main() {
         );
       }
 
-      const conn = await adapter.connect();
-      if (!conn.ok) {
-        console.error(`[ci] 连接失败：${conn.code} ${conn.message}`);
-        process.exitCode = 1;
-        return;
-      }
-      const wf = cfgFile.defaults.waitForResponse;
-      const loop = new AgentLoop(adapter, {
-        goal: resumeSession ? resumeSession.goal : goal,
+      const result = await executeTask(adapter, cfgFile.defaults.waitForResponse, {
+        goal,
         workspaceRoot,
         maxRounds: turns,
         autoApprove,
+        backendName: backend.displayName,
         resumeSession,
-        waitFor: {
-          baselineAssistantCount: 0,
-          totalTimeoutMs: wf.totalTimeoutMs,
-          stablePolls: wf.stablePolls,
-          pollIntervalMs: wf.pollIntervalMs,
-          rejectPatterns: ['服务繁忙', '请稍后再试', '访问被拒绝'],
-        },
       });
-      console.log(
-        `[ci] 任务=${loop.sessionId} 工作区=${workspaceRoot} 后端=${backend.displayName} 本轮上限=${turns}轮${autoApprove ? ' 自动放行' : ''}`,
-      );
-      // 注入会话标识环境变量：run_command 派生的孙进程（含 webai 自身）将因 WEBAI_AGENT_SESSION 被拒
-      process.env['WEBAI_AGENT_SESSION'] = loop.sessionId;
-      const done = await loop.run();
-      console.log(`[ci] 结束：${done.status}（${done.rounds.length} 轮）`);
-      if (done.summary) console.log(`[ci] 总结：${done.summary}`);
       // CI 语义：完成=0，失败/停止=1（方便流水线判断）
-      process.exitCode = done.status === 'finished' ? 0 : 1;
+      process.exitCode = result.ok ? 0 : 1;
       return;
     }
     default:
-      console.error(`未知命令：${cmd}`);
+      console.error(`未知命令：${cmd0}`);
       process.exitCode = 1;
   }
 }
