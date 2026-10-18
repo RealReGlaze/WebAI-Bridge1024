@@ -160,6 +160,24 @@ export class MimoWebAdapter extends IModelAdapter {
     }
   }
 
+  /** 深度思考开关（MiMo）：定位文本含「深度思考/深度/推理」的 composer 开关并点击。 */
+  override async setDeepThink(enabled: boolean): Promise<boolean> {
+    if (!this.page) return false;
+    const candidates = ['text=深度思考', 'text=深度推理', 'text=推理', 'text=思考'];
+    for (const sel of candidates) {
+      const btn = this.page.locator(sel).first();
+      if (!(await btn.isVisible().catch(() => false))) continue;
+      try {
+        await btn.click({ timeout: 5000 });
+        console.log(`[mimo] 深度思考开关已提交：${enabled ? '开' : '关'}（页面实际状态以其 UI 为准）。`);
+        return true;
+      } catch {
+        continue;
+      }
+    }
+    return false;
+  }
+
   /** 诊断：dump 候选选择器命中情况 + textareas + 按钮文本（登录后校准选择器用） */
   async probe(): Promise<Record<string, unknown>> {
     if (!this.page) throw new Error('未连接');

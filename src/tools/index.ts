@@ -185,6 +185,8 @@ export const searchCode: Tool = {
  * =======
  */
 const PATCH_MARKER = /^path:\s*(?<path>[^\r\n]+)\r?\n(?:\r?\n)?={3,}\r?\n(?<search>[\s\S]*?)\r?\n?={3,}\r?\n(?<replace>[\s\S]*?)\r?\n?={3,}\s*$/;
+/** 供协议层复用（隐蔽标记的补丁体解析） */
+export { PATCH_MARKER };
 
 export const applyPatch: Tool = {
   name: 'apply_patch',

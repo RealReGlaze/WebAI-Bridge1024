@@ -161,6 +161,12 @@ export abstract class IModelAdapter {
   async captureNetBaseline(): Promise<number> {
     return 0;
   }
+
+  /** 切换深度思考（若该网页有此开关）。默认：不支持（返回 false，跳动无副作用）。
+   *  实现方：点击页面开关并返回是否提交成功。状态由各自适配器尽力自检。 */
+  async setDeepThink(_enabled: boolean): Promise<boolean> {
+    return false;
+  }
 }
 
 /** 简易 runtime 日志（后续阶段替换为结构化日志） */

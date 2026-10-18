@@ -42,6 +42,30 @@ export const ARG_END = '\u27E6/ARG\u27E7';
 export const FINISH_START = '<finish>';
 export const FINISH_END = '</finish>';
 
+/** 隐蔽自然语调用标记（首选协议）：网页对话里不显眼，但 Harness 可靠识别。
+ *  模型用 [中文短语]（或全角 【】）表达一次调用；参数写在下一行起，格式 `键：值`；[收工] = 完成任务。 */
+export const COVERT_TOKENS: Record<string, string> = {
+  '查查目录': 'list_files',
+  '翻看文件': 'read_file',
+  '搜个关键词': 'search_code',
+  '改改这里': 'apply_patch',
+  '跑个小命令': 'run_command',
+  '构建一下': 'run_build',
+  '测一测': 'run_tests',
+  '对比改动': 'git_diff',
+};
+/** 完成标记（隐蔽） */
+export const COVERT_FINISH = '收工';
+/** 中文参数键 → 工具参数名（键值解析时归一） */
+export const COVERT_KEYS: Record<string, string> = {
+  '路径': 'path', '目录': 'path', '文件': 'path',
+  '命令': 'command',
+  '补丁': 'patch', '内容': 'patch',
+  '查询': 'query', '关键词': 'query', '正则': 'query',
+  '过滤': 'glob', '文件名': 'glob',
+  '最多行数': 'maxLines', 'status': 'status', '状态': 'status',
+};
+
 export function toolCatalog(tools: Tool[] = defaultTools): string {
   return tools
     .map(
@@ -68,8 +92,44 @@ export function buildSystemMessage(goal: string, workspaceRoot: string, tools: T
     '# 可用工具',
     toolCatalog(tools),
     '',
-    '# 工具调用协议（严格遵守；不需要做 JSON 转义）',
-    '1. 需要操作文件或执行命令时，回复中输出一个或多个调用块，格式：',
+    '# 调用协议（首选：隐蔽自然语标记）---- 严格遵守，参数值不需要任何转义 ----',
+    '需要操作时，在回复中输出下面的自然语标记；Harness 会识别并只回传真实结果。',
+    '',
+    '| 标记 | 对应操作 |',
+    '|---|---|',
+    '| [查查目录] | list_files 列目录 |',
+    '| [翻看文件] | read_file 读文件 |',
+    '| [搜个关键词] | search_code 搜索 |',
+    '| [改改这里] | apply_patch 修改/新建文件 |',
+    '| [跑个小命令] | run_command 执行命令 |',
+    '| [构建一下] | run_build 构建 |',
+    '| [测一测] | run_tests 测试 |',
+    '| [对比改动] | git_diff 查看差异 |',
+    '| [收工] 一两句总结 | 结束任务 |',
+    '',
+    '参数规则：标记的下一行起写参数，格式 `参数名: 值`（中英文冒号均可，参数名可用中文：路径/命令/查询/过滤/补丁）。',
+    '示例 A（列目录）：',
+    '[查查目录]',
+    '路径: src/runtime',
+    '',
+    '示例 B（读文件）：',
+    '[翻看文件]',
+    '路径: README.md',
+    '',
+    '示例 C（补丁，原样写不需要转义；SEARCH 与文件现有内容逐字一致，新建文件时两条 ======= 之间留空）：',
+    '[改改这里]',
+    'path: 相对路径',
+    '=======',
+    'SEARCH 原文',
+    '=======',
+    'REPLACE 新原文',
+    '=======',
+    '',
+    '示例 D（结束）：[收工] 已创建 fib.ts 并通过测试。',
+    '也可以省略参数行直接把单个值写在标记后同一行，如 [查查目录] src（等价于 路径: src）。',
+    '',
+    '# 备用调用块（标准标记；优先级低于上面的隐蔽标记）',
+    '1. 需要时回复中输出一个或多个调用块，格式：',
     '',
     `${CANON_START}name: 工具名`,
     `${ARG_START_PREFIX}参数名${ARG_END_MARKUP}`,
@@ -77,16 +137,11 @@ export function buildSystemMessage(goal: string, workspaceRoot: string, tools: T
     ARG_END,
     CANON_END,
     '',
-    `   说明：每个参数一对标记——开 ${ARG_START_PREFIX}参数名${ARG_END_MARKUP} 与 ${ARG_END}，参数值写在它们之间（下一行开始），无需 \\n 或 \\" 转义，直接原样写。参数可有可无。`,
-    '   多参数示例：先一个参数块关闭后再写下一对参数标记。',
-    '2. apply_patch 的 patch 参数（原样写）：',
-    '   第一行：path: 相对路径',
-    '   第二行：=======（七个等号）',
-    '   新建文件：SEARCH 段为空 → 写法是连续两条 =======，之间不放任何内容，然后 REPLACE 原文，末尾再一条 =======。',
-    '   修改文件：SEARCH 原文放两条 ======= 之间（必须与 read_file 输出逐字符一致，去掉行号「12: 」前缀），然后一条 =======，然后 REPLACE 原文，末尾一条 =======。',
+    `   每个参数一对标记——开 ${ARG_START_PREFIX}参数名${ARG_END_MARKUP} 与 ${ARG_END}，参数值写在它们之间（下一行开始），无需 \\n 或 \\" 转义，直接原样写。`,
+    '2. apply_patch 也可用标准块，patch 参数格式与上面 [改改这里] 完全一致（path: / ======= / ======= / =======）。',
     '3. 其它工具：list_files 的 path 可写 "."；read_file 只需 path；run_tests / run_command 的 command 写 "node fib.test.ts" 这样一行。',
     '4. <tool_result> 会以编号实时回传每个调用的真实结果（stdout/错误/拒绝原因）。收到结果后再决定下一步。',
-    '5. 全部完成后输出一行：<finish>一两句话总结</finish>，不再提交新调用块。',
+    '5. 全部完成后输出 [收工] 总结（或 <finish>一两句话总结</finish>），不再提交新调用块。',
     '6. ok=false 且语义含"拒绝"时不要原样重试；纠正或 <finish> 说明受阻原因。',
     '7. 需要操作就必须真的输出调用块，不能只在文字里说"我将要执行"。',
     '   你也可以用你的原生调用模板（invoke/parameter），Harness 两种都识别。',
@@ -163,7 +218,67 @@ function validateAndBuild(name: string, args: Record<string, unknown>, raw: stri
   return { name, args, raw };
 }
 
-/** 单个调用块 JSON → 校验 → ToolCall */
+/** 隐蔽标记解析：[中文短语] / 【中文短语】 → 工具调用；参数体在同一标记之后的文本里。
+ *  体解析优先级：① 含 =======（补丁）→ 整体按 SEARCH/REPLACE 补丁格式；② `键: 值` 行（中英冒号、中英键）；
+ *  ③ 单行短值 → 直接作为该工具的第一个参数（list_files→path 等）。 */
+function parseCovert(text: string, tools: Tool[], errors: string[]): { calls: ToolCall[]; finish: { text: string } | null } {
+  const tokenRe = /[【\[]\s*([^\]】]{1,12})\s*[\]】]/g;
+  type Hit = { start: number; token: string; name: string | null; isFinish: boolean };
+  const hits: Hit[] = [];
+  let m: RegExpExecArray | null;
+  while ((m = tokenRe.exec(text)) !== null) {
+    const tok = m[1]!.trim();
+    const tool = COVERT_TOKENS[tok];
+    if (!tool && tok !== COVERT_FINISH) continue;
+    hits.push({ start: m.index, token: tok, name: tool ?? null, isFinish: tok === COVERT_FINISH });
+  }
+  const calls: ToolCall[] = [];
+  let finish: { text: string } | null = null;
+  for (let h = 0; h < hits.length; h++) {
+    const hit = hits[h]!;
+    const open = text[hit.start]!; // '[' 或 '【'
+    const close = open === '【' ? '】' : ']';
+    const closeIdx = text.indexOf(close, hit.start);
+    const after = closeIdx + 1;
+    const bodyEnd = h + 1 < hits.length ? hits[h + 1]!.start : text.length;
+    const body = text.slice(after, bodyEnd).trim();
+    if (hit.isFinish) {
+      finish = { text: body.replace(/\s+/g, ' ').trim() };
+      continue;
+    }
+    if (!body) {
+      const call = validateAndBuild(hit.name!, {}, hit.token, tools, errors);
+      if (call) calls.push(call);
+      continue;
+    }
+    // ① 补丁体：整体按 SEARCH/REPLACE 处理
+    if (/={3,}/.test(body) && /path\s*[:：]/.test(body)) {
+      const call = validateAndBuild(hit.name!, { patch: body.replace(/\r\n/g, '\n') }, hit.token, tools, errors);
+      if (call) calls.push(call);
+      continue;
+    }
+    // ② 键值行：键可中文 → 归一为工具参数名；键必须是工具声明过的参数，避免把普通句子误判为参数
+    const tool = tools.find((t) => t.name === hit.name);
+    const args: Record<string, unknown> = {};
+    for (const line of body.split(/\r?\n/)) {
+      const kv = /^\s*([^\s:：]{1,16})\s*[:：]\s*(.+?)\s*$/.exec(line);
+      if (!kv) continue;
+      const en = COVERT_KEYS[kv[1]!] ?? kv[1]!;
+      if (!tool || !tool.params.some((p) => p.name === en)) continue;
+      args[en] = kv[2]!;
+    }
+    if (Object.keys(args).length > 0) {
+      const call = validateAndBuild(hit.name!, args, hit.token, tools, errors);
+      if (call) calls.push(call);
+      continue;
+    }
+    // ③ 单行/纯文本 → 工具声明的第一个参数
+    const firstParam = tool?.params[0]?.name;
+    const call = validateAndBuild(hit.name!, firstParam ? { [firstParam]: body.replace(/\s+/g, ' ') } : {}, hit.token, tools, errors);
+    if (call) calls.push(call);
+  }
+  return { calls, finish };
+}
 function buildCall(raw: string, tools: Tool[], errors: string[]): ToolCall | null {
   let obj: unknown;
   try {
@@ -299,6 +414,11 @@ export function parseReply(text0: string, tools: Tool[] = defaultTools): ParsedR
     const call = parseBlockBody(raw, tools, errors);
     if (call) calls.push(call);
   }
+
+  // 第三入口：隐蔽自然语标记（[查查目录] 等；与标准标记互不干扰，混合使用也识别）
+  const covert = parseCovert(text, tools, errors);
+  for (const call of covert.calls) calls.push(call);
+  if (!finish && covert.finish && covert.finish.text) finish = covert.finish.text;
 
   return { calls, finish, errors, mode };
 }

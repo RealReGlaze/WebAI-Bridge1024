@@ -11,13 +11,12 @@
  *   npm.cmd start -- chat "消息"  send + reply 一次完成
  *   npm.cmd start -- new      新建会话
  */
-import { readFileSync } from 'node:fs';
+import { mkdirSync, writeFileSync, readdirSync, readFileSync, existsSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createAdapter } from './adapters/factory.js';
 import type { BackendConfig, IModelAdapter } from './adapters/IModelAdapter.js';
-import { AgentLoop, clearQueuedLines, readLineOnce, type AgentSessionState } from './runtime/agent.js';
-import { existsSync, mkdirSync, readdirSync } from 'node:fs';
+import { AgentLoop, clearQueuedLines, readLineOnce, summarizeSessionDigest, type AgentSessionState } from './runtime/agent.js';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const CONFIG_PATH = path.join(ROOT, 'config', 'backends.json');
@@ -38,6 +37,48 @@ interface ConfigFile {
 /** 版本号取自 package.json（--version 与交互横幅显示） */
 const VERSION: string =
   (JSON.parse(readFileSync(path.join(ROOT, 'package.json'), 'utf-8')) as { version?: string }).version ?? '0.0.0';
+
+/* ---------------- 跨对话/跨模型前情摘要（滚动记忆库） ---------------- */
+interface ContextEntry {
+  at: number;
+  model: string;
+  goal: string;
+  digest: string;
+}
+interface ContextStore {
+  workspaces: Record<string, ContextEntry[]>;
+}
+const CONTEXT_FILE = path.join(ROOT, '.runtime', 'context.json');
+
+function loadContextStore(): ContextStore {
+  try {
+    const raw = JSON.parse(readFileSync(CONTEXT_FILE, 'utf-8')) as ContextStore;
+    return raw && raw.workspaces ? raw : { workspaces: {} };
+  } catch {
+    return { workspaces: {} };
+  }
+}
+
+function saveContextStore(store: ContextStore): void {
+  mkdirSync(path.dirname(CONTEXT_FILE), { recursive: true });
+  writeFileSync(CONTEXT_FILE, JSON.stringify(store, null, 2), 'utf-8');
+}
+
+/** 取某工作区的前情摘要（拼接最近 3 条任务，总量截到 ~4000 字符） */
+function digestForWorkspace(store: ContextStore, workspaceRoot: string): string {
+  const list = store.workspaces[workspaceRoot] ?? [];
+  const text = list
+    .map((e) => `- ${new Date(e.at).toLocaleString()}（${e.model}）` + '\n' + e.digest)
+    .join('\n');
+  return text.length > 4000 ? text.slice(text.length - 4000) : text;
+}
+
+function appendDigest(store: ContextStore, workspaceRoot: string, entry: ContextEntry): void {
+  const list = store.workspaces[workspaceRoot] ?? (store.workspaces[workspaceRoot] = []);
+  list.push(entry);
+  store.workspaces[workspaceRoot] = list.slice(-3);
+  saveContextStore(store);
+}
 
 function loadConfig(): ConfigFile {
   return JSON.parse(readFileSync(CONFIG_PATH, 'utf-8')) as ConfigFile;
@@ -86,6 +127,9 @@ async function executeTask(
     autoApprove: boolean;
     backendName?: string;
     resumeSession?: AgentSessionState;
+    contextDigest?: string;
+    pacingMs?: number;
+    deepThink?: boolean;
   },
 ): Promise<{ ok: boolean; session: AgentSessionState | null }> {
   const conn = await adapter.connect();
@@ -99,6 +143,9 @@ async function executeTask(
     maxRounds: params.maxRounds,
     autoApprove: params.autoApprove,
     resumeSession: params.resumeSession,
+    contextDigest: params.contextDigest,
+    pacingMs: params.pacingMs,
+    deepThink: params.deepThink,
     waitFor: {
       baselineAssistantCount: 0,
       totalTimeoutMs: wf.totalTimeoutMs,
@@ -145,13 +192,18 @@ async function runInteractive(restArgs: string[]): Promise<void> {
   const currentBackend = () => pickBackend(cfgFile, backendChoice);
   const backend = currentBackend();
 
+  // 会话级状态：每模型深度思考开关、轮间节流秒数、前情摘要库
+  const deepMap: Record<string, boolean> = {};
+  let waitSec = 0;
+  let contextStore = loadContextStore();
+
   console.log();
   console.log(`=========================================================================`);
   console.log(`                     Welcome to WebAI Bridge CLI!`);
   console.log(`  WebAI Bridge v${VERSION}   后端：${backend.displayName}（${backend.id}）`);
   console.log(`  工作目录：${workspaceRoot}`);
   console.log(`  模式自动切换：模型首轮声明 <mode>ask</mode>（快问快答/3 轮）或 <mode>work</mode>（正式任务/${turns} 轮）`);
-  console.log('  输入任务目标后回车即执行；/tasks · /show <ID> · /auto on|off · /accept-all · /switch [后端] · /continue [ID] · /exit');
+  console.log('  输入任务目标后回车即执行；/model <name> · /deep-on|off · /wait <s> · /ctx · /tasks · /auto · /accept-all · /continue · /exit');
   console.log(`=========================================================================`);
   if (auto) console.log('  [--yes] 高风险操作自动放行。');
   console.log();
@@ -190,29 +242,61 @@ async function runInteractive(restArgs: string[]): Promise<void> {
       continue;
     }
     if (/^\/help\b/i.test(line)) {
-      console.log('命令：/tasks 任务列表 · /show <ID> [--transcript] 任务详情 · /auto on|off 自动审批 · /accept-all 全部允许（二次确认） · /switch [后端] 切换模型（跨模型交接见 /continue） · /continue [ID] 续跑未完成任务 · /exit 退出');
+      console.log('命令：/model <name|list>（/switch 同义）· /deep-on|off 深度思考 · /wait <秒> 节流防风控 · /ctx [clear] 前情摘要 · /tasks · /show <ID> [--transcript] · /auto on|off · /accept-all · /continue [ID] · /exit 退出');
       continue;
     }
-    if (/^\/switch\b/i.test(line)) {
-      const m = /^\/switch\s+(\S+)\s*$/i.exec(line);
-      if (!m) {
+    if (/^\/model\b/i.test(line) || /^\/switch\b/i.test(line)) {
+      const m = /^(?:\/model|\/switch)(?:\s+(\S+))?\s*$/i.exec(line);
+      if (!m || !m[1]) {
         console.log('可用后端：' + cfgFile.backends.filter((b) => (b as BackendConfig & { enabled?: boolean }).enabled !== false).map((b) => `${b.displayName}（${b.id}）`).join('，'));
-        console.log('用法：/switch <后端id>（对下一个任务生效；跨模型续跑用 /continue）');
+        console.log('用法：/model <后端名>（或 /switch <后端名>；对下一个任务的新对话生效）');
         continue;
       }
-      try {
-        const key = m[1]!.toLowerCase();
-        const hit = cfgFile.backends.find(
-          (b) =>
-            (b as BackendConfig & { enabled?: boolean }).enabled !== false &&
-            (b.id === m[1] || b.id.toLowerCase().includes(key) || b.displayName.toLowerCase().includes(key)),
-        );
-        if (!hit) throw new Error('not-found');
-        backendChoice = hit.id;
-        console.log(`[后端] 已切换：${hit.displayName}（${hit.id}）——对下一个任务的新对话生效。`);
-      } catch {
-        console.log(`[后端] 没有匹配「${m[1]}」的已启用后端。可用：${cfgFile.backends.filter((b) => (b as BackendConfig & { enabled?: boolean }).enabled !== false).map((b) => b.id).join('，')}`);
+      const key = m[1]!.toLowerCase();
+      if (key === 'list') {
+        console.log('可用后端：' + cfgFile.backends.filter((b) => (b as BackendConfig & { enabled?: boolean }).enabled !== false).map((b) => `${b.displayName}（${b.id}）`).join('，'));
+        continue;
       }
+      const hit = cfgFile.backends.find(
+        (b) =>
+          (b as BackendConfig & { enabled?: boolean }).enabled !== false &&
+          (b.id === m[1] || b.id.toLowerCase().includes(key) || b.displayName.toLowerCase().includes(key)),
+      );
+      if (!hit) {
+        console.log(`[后端] 没有匹配「${m[1]}」的已启用后端。可用：${cfgFile.backends.filter((b) => (b as BackendConfig & { enabled?: boolean }).enabled !== false).map((b) => b.id).join('，')}`);
+        continue;
+      }
+      backendChoice = hit.id;
+      console.log(`[后端] 已切换：${hit.displayName}（${hit.id}）——对下一个任务的新对话生效。深度思考=${deepMap[hit.id] === undefined ? '不动页面开关' : deepMap[hit.id] ? '开' : '关'}（/deep-on · /deep-off）`);
+      continue;
+    }
+    if (/^\/deep-on\s*$/i.test(line) || /^\/deep-off\s*$/i.test(line)) {
+      const on = /^\/deep-on/i.test(line);
+      deepMap[currentBackend().id] = on;
+      console.log(`[深度思考] ${currentBackend().displayName}（${currentBackend().id}）→ ${on ? '开' : '关'}；自下一个任务的新对话生效（新对话打开后由 Harness 点击页面开关）。`);
+      continue;
+    }
+    if (/^\/wait\b/i.test(line)) {
+      const m = /^\/wait\s*(\d+)?\s*$/i.exec(line);
+      if (!m) {
+        console.log('用法：/wait <秒数>（0 = 关闭节流；每轮发送前等待，防风控）');
+        continue;
+      }
+      waitSec = Math.min(Number(m[1] ?? 0) || 0, 600);
+      console.log(waitSec ? `[节流] 已设置：每轮发送前等待 ${waitSec}s。` : '[节流] 已关闭（0s）。');
+      continue;
+    }
+    if (/^\/ctx\b/i.test(line)) {
+      const m = /^\/ctx(?:\s+(clear))?\s*$/i.exec(line);
+      if (m && m[1] === 'clear') {
+        contextStore = loadContextStore();
+        delete contextStore.workspaces[workspaceRoot];
+        saveContextStore(contextStore);
+        console.log('[前情] 已清空当前工作区的摘要库。');
+        continue;
+      }
+      const d = digestForWorkspace(contextStore, workspaceRoot);
+      console.log(d ? `[前情] 当前工作区摘要（自动注入新对话）：\n${d}` : '[前情] 当前工作区暂无摘要（任务完成后自动累积；/ctx clear 清空）。');
       continue;
     }
     if (/^\/continue\b/i.test(line)) {
@@ -254,6 +338,8 @@ async function runInteractive(restArgs: string[]): Promise<void> {
           autoApprove: auto,
           backendName: backend2.displayName,
           resumeSession: target,
+          pacingMs: waitSec * 1000,
+          deepThink: deepMap[backend2.id],
         });
       } catch (e) {
         console.error('[continue] 任务执行异常：', e);
@@ -293,20 +379,32 @@ async function runInteractive(restArgs: string[]): Promise<void> {
       continue;
     }
     if (line.startsWith('/')) {
-      console.log('未知命令（/tasks /show /auto /accept-all /switch /continue /help /exit）');
+      console.log('未知命令（/model /deep-on|off /wait /ctx /tasks /show /auto /accept-all /continue /help /exit）');
       continue;
     }
     // 任务执行：行读取已在工具确认间放开（一次性接口），无需 pause/resume
     try {
       const backendForTask = currentBackend();
       const adapterForTask = createAdapter(backendForTask);
-      await executeTask(adapterForTask, wf, {
+      const result = await executeTask(adapterForTask, wf, {
         goal: line,
         workspaceRoot,
         maxRounds: turns,
         autoApprove: auto,
         backendName: backendForTask.displayName,
+        contextDigest: digestForWorkspace(contextStore, workspaceRoot),
+        pacingMs: waitSec * 1000,
+        deepThink: deepMap[backendForTask.id],
       });
+      // 任务结束后滚动累积前情摘要（跨对话/跨模型接力；最多保留最近 3 条）
+      if (result.session) {
+        appendDigest(contextStore, workspaceRoot, {
+          at: Date.now(),
+          model: backendForTask.id,
+          goal: result.session.goal.slice(0, 120),
+          digest: summarizeSessionDigest(result.session),
+        });
+      }
     } catch (e) {
       console.error('[interactive] 任务执行异常：', e);
     } finally {
@@ -342,7 +440,7 @@ async function main() {
   start -- browser/status/probe 连接、状态、页面结构诊断
   start -- list                 列出本地任务会话（.runtime/tasks）
   start -- show <ID> [--transcript]  查看某任务的轮次/总结/完整成果（嵌套被拦后成果不会失踪）
-  交互模式命令：/tasks · /show · /auto on|off（自动审批开关，自下一个任务新对话生效）· /accept-all（全部允许，需二次确认）· /switch [后端]（切换模型）· /continue [ID]（续跑/跨模型交接）· /help · /exit
+  交互模式命令：/model <name|list> · /deep-on|off（深度思考）· /wait <秒>（节流）· /ctx [clear]（前情摘要）· /tasks · /show · /auto on|off · /accept-all · /continue [ID] · /help · /exit
 启动器：项目 bin/webai.cmd（任意目录调用，如 webai.cmd ci "修复所有测试" -C E:\\proj）
 可用 BACKEND_ID 环境变量或 --backend <后端> 指定后端 id；WEBAI_DEBUG=1 输出回复等待诊断。`);
     return;
@@ -545,6 +643,10 @@ async function main() {
         else if (a === '--continue') flags['continue'] = true;
         else if (a === '--debug') flags['debug'] = true;
         else if (a === '--backend') { flags['backend'] = rest[++i] ?? ''; }
+        else if (a === '--wait') { flags['wait'] = rest[++i] ?? '0'; }
+        else if (a === '--deep') flags['deep'] = true;
+        else if (a === '--deep-off') flags['deepOff'] = true;
+        else if (a === '--no-ctx') flags['noCtx'] = true;
         else if (a === '--resume') { flags['resume'] = rest[++i] ?? ''; }
         else if (a === '-C' || a === '--dir') { flags['dir'] = rest[++i] ?? '.'; }
         else if (a === '--max-turns' || a === '-t' || a === '--max') { flags['turns'] = rest[++i] ?? ''; }
@@ -588,6 +690,12 @@ async function main() {
       const turns = maxRounds;
       const autoApprove = flags['yes'] === true;
       if (autoApprove) console.log('[ci] 已启用 --yes：高风险操作自动放行（不再逐项人工确认）。');
+      const waitFlag = Math.min(Math.max(Number(flags['wait'] ?? 0) || 0, 0), 600);
+      if (waitFlag > 0) console.log(`[ci] 已启用 --wait ${waitFlag}s：每轮发送前节流等待。`);
+      const deepFlag = flags['deep'] === true ? true : flags['deepOff'] === true ? false : undefined;
+      if (deepFlag !== undefined) console.log(`[ci] 深度思考开关：${deepFlag ? '开' : '关'}（连接后点击页面开关）。`);
+      const noCtx = flags['noCtx'] === true;
+      if (noCtx) console.log('[ci] 已禁用前情摘要注入（--no-ctx）。');
 
       // 续跑：--resume <id> 精确恢复；--continue 恢复同工作区最近的未完成任务
       let resumeSession: AgentSessionState | undefined;
@@ -639,7 +747,19 @@ async function main() {
         autoApprove,
         backendName: backend.displayName,
         resumeSession,
+        contextDigest: noCtx ? undefined : digestForWorkspace(loadContextStore(), workspaceRoot),
+        pacingMs: waitFlag * 1000,
+        deepThink: deepFlag,
       });
+      // ci 也滚动累积前情摘要（除非 --no-ctx）
+      if (!noCtx && result.session) {
+        appendDigest(loadContextStore(), workspaceRoot, {
+          at: Date.now(),
+          model: backend.id,
+          goal: result.session.goal.slice(0, 120),
+          digest: summarizeSessionDigest(result.session),
+        });
+      }
       // CI 语义：完成=0，失败/停止=1（方便流水线判断）
       process.exitCode = result.ok ? 0 : 1;
       return;

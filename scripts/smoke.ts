@@ -4,7 +4,7 @@
  */
 import { rmSync, existsSync, readFileSync } from 'node:fs';
 import path from 'node:path';
-import { parseReply, buildToolResultMessage, buildRetryMessage } from '../src/protocol.js';
+import { parseReply, buildToolResultMessage, buildRetryMessage, CANON_START, CANON_END } from '../src/protocol.js';
 import { DeepSeekWebAdapter } from '../src/adapters/DeepSeekWebAdapter.js';
 import { buildResumeMessage, type AgentRoundLog, type AgentSessionState } from '../src/runtime/agent.js';
 import { applyPatch, runCommand, defaultTools } from '../src/tools/index.js';
@@ -270,6 +270,38 @@ function main() {
     (!/跨模型交接/.test(same) && /续跑说明/.test(same))
       ? pass('同后端续跑消息保持原样')
       : fail('同后端续跑消息保持原样', same.slice(0, 200));
+
+    // 隐蔽自然语标记：[查查目录]（半角括号 + 中文键） → list_files
+    const c1 = parseReply('[查查目录]\n路径: src/runtime');
+    c1.calls.length === 1 && c1.calls[0]!.name === 'list_files' && c1.calls[0]!.args['path'] === 'src/runtime'
+      ? pass('隐蔽标记解析（[查查目录] 中文键）')
+      : fail('隐蔽标记解析（[查查目录] 中文键）', JSON.stringify(c1));
+
+    // 全角括号 + 同行单值 shorthand
+    const c2 = parseReply('先看一下结构：【查查目录】 sandbox-tasks/cur');
+    c2.calls.length === 1 && c2.calls[0]!.name === 'list_files' && String(c2.calls[0]!.args['path']) === 'sandbox-tasks/cur'
+      ? pass('隐蔽标记解析（全角【】+同行单值）')
+      : fail('隐蔽标记解析（全角【】+同行单值）', JSON.stringify(c2));
+
+    // 补丁体整体进入 patch 参数（SEARCH/REPLACE 不丢）
+    const patchBody = '[改改这里]\npath: a.ts\n=======\nconst a = 1;\n=======\nconst a = 2;\n=======';
+    const c3 = parseReply(patchBody);
+    const pc = c3.calls[0];
+    pc?.name === 'apply_patch' && typeof pc.args['patch'] === 'string' && pc.args['patch'].includes('const a = 2;') && pc.args['patch'].includes('path: a.ts')
+      ? pass('隐蔽标记解析（[改改这里] 补丁体保全）')
+      : fail('隐蔽标记解析（[改改这里] 补丁体保全）', JSON.stringify(c3));
+
+    // 中文键命令 + 英文键混用 & [收工] 完成
+    const c4 = parseReply('跑一下测试\n[测一测]\n命令: node fib.test.ts\n[收工] 全部测试通过。');
+    c4.calls.length === 1 && c4.calls[0]!.name === 'run_tests' && c4.calls[0]!.args['command'] === 'node fib.test.ts' && c4.finish === '全部测试通过。'
+      ? pass('隐蔽标记解析（命令中文键 + [收工] 完成）')
+      : fail('隐蔽标记解析（命令中文键 + [收工] 完成）', JSON.stringify({ calls: c4.calls, finish: c4.finish }));
+
+    // 与标准标记混合也识别；普通中文句子不被误判为调用
+    const c5 = parseReply('我将 [查查目录]\n然后处理。\n' + CANON_START + 'name: git_diff' + CANON_END);
+    c5.calls.length === 2 && c5.calls.some((x) => x.name === 'git_diff') && c5.calls.some((x) => x.name === 'list_files')
+      ? pass('隐蔽标记与标准标记混合识别')
+      : fail('隐蔽标记与标准标记混合识别', JSON.stringify(c5));
 
     console.log(process.exitCode ? '\n存在失败用例。' : '\n全部通过。');
     process.exit(process.exitCode ?? 0);

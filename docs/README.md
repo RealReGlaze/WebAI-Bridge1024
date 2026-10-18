@@ -24,7 +24,13 @@ webai.cmd --yes -t 20            # 高风险自动放行；轮数预算 20
 - 每次在 `>>` 后输入任务目标回车即执行一个任务，可连续多轮交互。
 - **默认工作区 = 你打开命令行时所在的目录**（`-C` 可临时切换；相对路径也基于它解析）。启动器会跨目录捕获原始目录，与项目根无关。
 - **工作模式由模型自判定**：模型在首轮回复声明 `<mode>ask</mode>`（快问快答，轮数预算自动收缩为 3 轮）或 `<mode>work</mode>`（正式执行任务，按启动预算走）。
-- 内置命令：`/tasks` 任务列表 · `/show <ID>` 任务详情 · `/auto on|off` 自动审批开关 · `/accept-all` 全部允许（二次确认） · `/switch [后端]` 切换模型 · `/continue [ID]` 续跑（跨模型交接） · `/exit` 退出。
+- 内置命令：`/model <name|list>`（`/switch` 同义）切换模型 · `/deep-on|off` 深度思考（按模型记忆，新对话自动点击页面开关） · `/wait <秒>` 每轮发送前节流（防风控，`0` 关闭） · `/ctx [clear]` 前情摘要查看/清空 · `/tasks` 任务列表 · `/show <ID>` 详情 · `/auto on|off` 自动审批 · `/accept-all` 全部允许（二次确认） · `/continue [ID]` 续跑 · `/exit` 退出。
+
+**前情摘要（跨对话/跨模型接力记忆）**：
+
+- 每个任务结束后，Harness 自动把「目标 / 每轮思考与回复摘录 / 工具结果 / 终态」压成滚动摘要，按工作区存入 `.runtime/context.json`（最多最近 3 条）。
+- **每次启动新网页对话时自动注入**该摘要（`# 前情摘要` 段）——无论这次是不是换了模型，对话都不因网页会话重建而失忆；`ci` 也遵循同样语义（`--no-ctx` 关闭单独一次注入）。
+- 与 `--resume`/`/continue` 的**全量续跑**互补：接力（跨对话）用摘要，断点续跑用完整轮次+思考过程。
 
 **多后端与跨模型交接**：
 
@@ -32,6 +38,12 @@ webai.cmd --yes -t 20            # 高风险自动放行；轮数预算 20
 - 已完成后端：DeepSeek（`deepseek`，已验证）、小米 MiMo（`mimo`，`aistudio.xiaomimimo.com/#/c`，**首次使用需在专用 Edge 窗口手动登录小米账号**，profile 独立 `.runtime/edge-profile-mimo`）。
 - **跨模型交接**：任务停留在 `--resume <ID> --backend <新后端>`（交互模式 `/switch` 后 `/continue`）即可由新模型接手——接手消息包含原后端署名、全部已执行轮次、每轮工具结果与**原模型思考过程摘录**，工具结果都来自本地真实执行，浏览器端会话丢失不影响上下文。同一任务可在 deepseek ↔ mimo 间反复交接。
 - MiMo 选择器按未登录态校准（输入框=textarea、登录指示=未登录/立即登录）；登录后如页面结构变化，用 `start -- probe --backend mimo` 诊断，并在 `config/backends.json` 的 `selectors` 里覆盖。
+
+**隐蔽调用协议（首选）**：
+
+- 系统提示词现在首选教学**自然语标记**：`[查查目录]`（list_files）、`[翻看文件]`（read_file）、`[搜个关键词]`（search_code）、`[改改这里]`（apply_patch）、`[跑个小命令]`（run_command）、`[构建一下]`、`[测一测]`、`[对比改动]`、`[收工]`（完成任务）；半角 `[x]` 与全角 `【x】` 都识别，CI/网页渲染都不显眼。
+- 参数：标记下一行起写 `参数名: 值`（中英文冒号均可、参数名可用中文：路径/命令/查询/过滤/补丁）；单值可写在标记同一行（`[查查目录] src`）；`apply_patch` 的 SEARCH/REPLACE 补丁体整体原样进入 patch 参数（无需转义）。
+- 兼容性：原始 ⟦TOOLCALL⟧ 标准块、```toolcall 围栏、DeepSeek 原生 DSML 摘要格式仍全部识别（同一回复里混用也行）；31 项冒烟回归覆盖各形状。
 - 键盘输入中文正常；若脚本管道喂入中文请先把宿主 pipe 编码设为 UTF-8（PowerShell 5.1 默认对原生程序管道用 ASCII，会把中文变 `?`）：
   ```powershell
   $OutputEncoding=[Console]::InputEncoding=[Console]::OutputEncoding=[System.Text.UTF8Encoding]::new()

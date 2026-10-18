@@ -311,9 +311,27 @@ export class DeepSeekWebAdapter extends IModelAdapter {
     }
   }
 
+  /** 深度思考（R1）开关：定位输入区「深度思考」开关元素并点击。
+   *  页面没有 aria/state API，采用「点击+尽力自检」：点击前若元素可见即切换；
+   *  返回是否找到并点击了开关。状态一致性以页面实际为准（后续实测校准选择器）。 */
+  override async setDeepThink(enabled: boolean): Promise<boolean> {
+    if (!this.page) return false;
+    const btn = this.page
+      .locator(`text=深度思考`)
+      .first();
+    const vis = await btn.isVisible().catch(() => false);
+    if (!vis) return false;
+    try {
+      await btn.click({ timeout: 5000 });
+      console.log(`[deepseek] 深度思考开关已提交：${enabled ? '开' : '关'}（页面实际状态以其 UI 为准）。`);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
   /** 诊断：dump 页面上候选选择器的命中情况，页面改版时校准用 */
-  async probe(): Promise<Record<string, unknown>> {
-    if (!this.page) throw new Error('未连接');
+  async probe(): Promise<Record<string, unknown>> {    if (!this.page) throw new Error('未连接');
     const out: Record<string, unknown> = { url: this.page.url() };
     const items: Array<{ selector: string; count: number }> = [];
     const add = (sel: string) => items.push({ selector: sel, count: 0 });

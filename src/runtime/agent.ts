@@ -30,6 +30,12 @@ export interface AgentLoopOptions {
   shouldStop?: () => boolean;
   /** 续跑：注入已保存的会话状态（transcript/进度/已执行签名），从中断点继续 */
   resumeSession?: AgentSessionState;
+  /** 前情摘要：全新网页对话的首条消息附加（跨对话/跨模型接力，来自 CLI 滚动摘要库） */
+  contextDigest?: string;
+  /** 轮间节流（防风控）：每轮发送前等待的毫秒数（/wait <seconds> 设置） */
+  pacingMs?: number;
+  /** 深度思考开关：connect 后立刻设置（undefined = 不动网页上的开关） */
+  deepThink?: boolean;
 }
 
 export interface AgentRoundLog {
@@ -180,6 +186,10 @@ export class AgentLoop {
       this.saveSession();
       return this.session;
     }
+    if (options.deepThink !== undefined) {
+      const toggled = await this.adapter.setDeepThink(options.deepThink);
+      if (!toggled) console.log(`[agent] 后端 ${this.adapter.backendId} 未提供深度思考开关（跳过）。`);
+    }
     // 每次运行都从新网页会话开始（续跑的新上下文由第一条消息重建，避免残留干扰）
     await this.adapter.startNewConversation();
 
@@ -189,6 +199,15 @@ export class AgentLoop {
       // 交接完成后记录当前执行后端（供下一次续跑/交接继续追溯）
       this.session.adapterId = this.adapter.backendId;
       this.saveSession();
+    } else if (options.contextDigest && options.contextDigest.trim()) {
+      // 全新网页对话：注入前情摘要（跨对话/跨模型接力的滚动记忆）
+      message += [
+        '',
+        '# 前情摘要（由之前任务接力；工具结果均来自本地真实执行，可信）',
+        options.contextDigest.trim(),
+        '',
+        '以上为接力记忆：可直接吸收，但涉及本地文件当前状态时先用工具核实再行动。',
+      ].join('\n');
     }
 
     // 动态轮数预算：hard cap = options.maxRounds；
@@ -211,6 +230,11 @@ export class AgentLoop {
       }
       remaining--;
       round++;
+      // 轮间节流（防风控）：每轮发送前等待 pacingMs
+      if (options.pacingMs && options.pacingMs > 0) {
+        console.log(`[agent] 节流等待 ${Math.round(options.pacingMs / 1000)}s 后发送本轮消息…`);
+        await new Promise((r) => setTimeout(r, options.pacingMs));
+      }
       const snap = (await this.adapter.getConversationState()).assistantMessageCount;
       const chatFp = await this.adapter.captureChatFingerprint();
       const netBaseline = await this.adapter.captureNetBaseline();
@@ -394,6 +418,28 @@ export function readLineOnce(q: string): Promise<string | null> {
 async function confirmPrompt(q: string): Promise<boolean> {
   const answer = await readLineOnce(q);
   return !!answer && /^\s*y(es)?\s*$/i.test(answer);
+}
+
+/** 会话滚动摘要（供 CLI 跨对话/跨模型接力）：每轮浓缩为 思考/回复/工具 三段短摘 + 终态。 */
+export function summarizeSessionDigest(session: AgentSessionState): string {
+  const cur = (s: string | undefined, n: number) => (s ?? '').replace(/\s+/g, ' ').trim().slice(0, n);
+  const lines: string[] = [`【目标】${cur(session.goal, 120)}`];
+  // 每个有日志的轮次都恰好收到过一条助手回复（发送失败会直接中止，不入轮次），
+  // 故 transcript 中 assistant 条目按序与本轮次数组一一对应。
+  const assistantTurns = session.transcript.filter((x) => x.role === 'assistant');
+  for (let i = 0; i < session.rounds.length; i++) {
+    const r = session.rounds[i]!;
+    const tools = r.calls.length
+      ? r.calls.map((c) => `${c.name}${c.digest ? `(${c.digest})` : ''}${c.ok ? '✓' : '✗'}`).join('，')
+      : `提示：${r.error ?? '-'}`;
+    const parts = [`第${r.round}轮 工具: ${tools}`];
+    if (r.thinking) parts.push(`思考: ${cur(r.thinking, 180)}`);
+    const t = assistantTurns[i];
+    if (t?.text) parts.push(`回复: ${cur(t.text, 260)}`);
+    lines.push('- ' + parts.join('｜'));
+  }
+  lines.push(`【终态】${session.status}${session.summary ? `：${cur(session.summary, 120)}` : ''}`);
+  return lines.join('\n');
 }
 
 /** 调用参数的简短摘要（日志/续跑上下文用）：优先人类可读键 */
