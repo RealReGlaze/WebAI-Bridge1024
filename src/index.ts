@@ -131,7 +131,7 @@ async function executeTask(
   params: {
     goal: string;
     workspaceRoot: string;
-    maxRounds: number;
+    maxRounds: number | null;
     autoApprove: boolean;
     backendName?: string;
     resumeSession?: AgentSessionState;
@@ -169,7 +169,7 @@ async function executeTask(
     },
   });
   console.log(
-    `[ci] 任务=${loop.sessionId} 工作区=${params.workspaceRoot} 后端=${params.backendName ?? '网页模型'} 本轮上限=${params.maxRounds}轮${params.autoApprove ? ' 自动放行' : ''}`,
+    `[ci] 任务=${loop.sessionId} 工作区=${params.workspaceRoot} 后端=${params.backendName ?? '网页模型'} 轮数=${params.maxRounds ? `上限 ${params.maxRounds} 轮` : '不设上限（模型自主推进）'}${params.autoApprove ? ' 自动放行' : ''}`,
   );
   // 注入会话标识环境变量：run_command 派生的孙进程（含 webai 自身）将因 WEBAI_AGENT_SESSION 被拒
   process.env['WEBAI_AGENT_SESSION'] = loop.sessionId;
@@ -183,7 +183,8 @@ async function executeTask(
 /** 无参交互模式：版本横幅 + >> 引导输入。工作目录 = 启动时的当前目录；ask/work 模式由模型自声明、轮数预算自动切换。 */
 async function runInteractive(restArgs: string[]): Promise<void> {
   // 启动旗标：[-t 轮数] [--yes] [--debug] [-C 目录] [--backend 后端]（-C 相对路径基于用户命令行目录）
-  let turns = 20;
+  // 轮数默认 null = 不设上限（模型自主推进直到/finish/停滞停机）；-t/--turns 显式给硬上限。
+  let turns: number | null = null;
   let auto = false;
   let workspaceRoot = INVOKED_CWD;
   let backendChoice = process.env['BACKEND_ID'];
@@ -216,7 +217,7 @@ async function runInteractive(restArgs: string[]): Promise<void> {
   console.log(`                     Welcome to WebAI Bridge CLI!`);
   console.log(`  WebAI Bridge v${VERSION}   后端：${backend.displayName}（${backend.id}）`);
   console.log(`  工作目录：${workspaceRoot}`);
-  console.log(`  模式自动切换：模型首轮声明 <mode>ask</mode>（快问快答/3 轮）或 <mode>work</mode>（正式任务/${turns} 轮）`);
+  console.log(`  模式自动切换：模型首轮声明 <mode>ask</mode>（快问快答/3 轮）或 <mode>work</mode>（正式任务/${turns ? `上限 ${turns} 轮` : '轮数不设上限，安全停机=连续无新进展'}）`);
   console.log('  输入任务目标后回车即执行；/model <name> · /deep-on|off · /wait <s> · /ctx · /tasks · /auto · /accept-all · /continue · /exit');
   console.log(`=========================================================================`);
   if (auto) console.log('  [--yes] 高风险操作自动放行。');
@@ -448,7 +449,7 @@ async function main() {
     console.log(`WebAI Bridge CLI —— 类 Claude Code 的本地 AI Agent 命令行
   webai ci "任务目标" [-C 目录] [-t 轮数] [--yes] [--resume ID | --continue]
                                      一键任务闭环（默认在当前目录工作，完成=退出码0）
-                                     -C 指定工作区；-t 本轮最大轮数；--yes 自动放行高风险操作
+ -C 指定工作区；-t 显式轮数上限（默认不设上限，模型自主推进）；--yes 自动放行高风险操作
                                      --resume 恢复指定任务；--continue 恢复同工作区最近未完成任务
   start -- agent "任务" [--dir dir] [--max N] [--yes]   旧版入口（默认工作区 sandbox-tasks/current）
   start -- chat "..."           单轮对话：发送并等待回复
@@ -702,7 +703,9 @@ async function main() {
         mkdirSync(workspaceRoot, { recursive: true });
         console.log(`[ci] 工作区不存在，已创建：${workspaceRoot}`);
       }
-      const maxRounds = Math.min(Math.max(Number(flags['turns'] ?? 15) || 15, 1), 50); // 钳制防模型任意传大值
+      // 轮数：默认不设上限（模型自主推进直到 /finish/停滞停机）；--turns 显式给硬上限（1~50）
+      const turnsFlag = flags['turns'] === undefined ? null : Math.min(Math.max(Number(flags['turns']) || 15, 1), 50);
+      const maxRounds = turnsFlag;
       const turns = maxRounds;
       const autoApprove = flags['yes'] === true;
       if (autoApprove) console.log('[ci] 已启用 --yes：高风险操作自动放行（不再逐项人工确认）。');

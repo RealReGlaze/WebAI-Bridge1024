@@ -3,7 +3,7 @@
  *
  * 流程：任务目标 → 系统消息（协议+工具说明）→ 发给网页模型 → 解析回复/调用块
  *   → 本地执行工具（沙箱+白名单+人工确认）→ 结果回传 → 循环
- * 停止条件：<finish> / 最大轮数 / 协议连续失败 / 重复失败调用检测 / 网页侧失败。
+ * 停止条件：<finish> / 显式轮数上限（默认不设，模型自主推进） / 连续无新进展停滞停机 / 重复失败调用检测 / 网页侧失败。
  *
  * 每轮任务状态持久化到 .runtime/tasks/<sessionId>.json，供恢复与跨模型交接。
  */
@@ -23,7 +23,9 @@ import {
 export interface AgentLoopOptions {
   goal: string;
   workspaceRoot: string;
-  maxRounds: number;
+  maxRounds?: number | null;
+  /** 停滞停机线：连续这么多轮「无任何新执行的工具调用」则判定停滞（默认 8；仅无上限模式生效） */
+  maxStallRounds?: number;
   waitFor: WaitForResponseOptions & { rejectPatterns?: string[] };
   autoApprove: boolean;
   /** 停止钩子（CLI 的 stop signal） */
@@ -288,15 +290,26 @@ export class AgentLoop {
       ].join('\n');
     }
 
-    // 动态轮数预算：hard cap = options.maxRounds；
-    // ask 模式（模型在首轮自声明 <mode>ask</mode>）收缩到 3 轮，work 按原预算走。
-    let remaining = options.maxRounds;
+    // 动态轮数预算：默认不设硬上限（模型自主推进，直到 <finish> / 手动停止 / 停滞停机）；
+    // 显式 maxRounds>0 才作为硬上限。ask 模式（模型自声明快问快答）收缩到 3 轮。
+    // 安全网：连续 maxStallRounds 轮「无任何新执行的工具调用」（协议重试/重复调用/无调用块）→ 判定停滞停机。
+    let remaining = (options.maxRounds ?? 0) > 0 ? (options.maxRounds as number) : Infinity;
+    let stallCount = 0;
+    const stallLimit = options.maxStallRounds ?? 8;
     let round = startRound;
     for (;;) {
       if (options.shouldStop?.()) {
         this.session.status = 'stopped';
         this.session.summary = '用户手动停止。';
         this.saveSession();
+        return this.session;
+      }
+      if (!isFinite(remaining) && stallCount >= stallLimit) {
+        // 无上限模式下唯一停机线：连续多轮无新进展（协议重试/重复调用/只评论不行动）
+        this.session.status = 'failed';
+        this.session.summary = `连续 ${stallCount} 轮无新进展，判定停滞已停机（可用 /continue 换个路径继续或人工接手）。`;
+        this.saveSession();
+        console.log(`[agent] 连续 ${stallCount} 轮无新进展，已停滞停机。`);
         return this.session;
       }
       if (remaining <= 0) {
@@ -371,6 +384,7 @@ export class AgentLoop {
         message = buildRetryMessage(parsed.errors);
         this.session.rounds.push(log);
         this.saveSession();
+        stallCount++;
         console.log(`[agent] 第 ${round} 轮：协议校验失败 x${parsed.errors.length}，已要求重发。`);
         continue;
       }
@@ -382,6 +396,7 @@ export class AgentLoop {
           '以上调用块此前已经执行过（结果见更早的 <tool_result>），本地未重复执行。请基于已有结果给出下一步：新的调用块，或 <finish>。不要重复提交同样的请求。';
         this.session.rounds.push(log);
         this.saveSession();
+        stallCount++;
         continue;
       }
 
@@ -401,6 +416,7 @@ export class AgentLoop {
           '请使用协议继续：要么输出调用块执行下一步操作，要么输出 <finish>总结</finish> 结束任务。不要只发表评论。';
         this.session.rounds.push(log);
         this.saveSession();
+        stallCount++;
         continue;
       }
 
@@ -408,6 +424,7 @@ export class AgentLoop {
       for (const c of freshCalls) {
         this.executedKeys.add(`${c.name}::${JSON.stringify(c.args)}`);
       }
+      stallCount = 0; // 本轮有新执行的工具调用 → 进展正常，重置停滞计数
       log.calls = results.map((r, i) => ({
         name: r.name,
         ok: r.result.ok,

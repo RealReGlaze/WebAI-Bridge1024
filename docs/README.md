@@ -68,7 +68,7 @@ E:\...\WebAPI\bin\webai.cmd ci --continue                          # 恢复同�
 E:\...\WebAPI\bin\webai.cmd ci --resume tmvdbnhod                  # 恢复指定任务（webai start -- list 查看 ID）
 ```
 
-`ci` 详细参数：`-t/--max-turns N` 本轮最大轮数（默认 15）；`--yes` 高风险操作自动放行（不带则逐项 y/n 人工确认）；`--debug` 输出回复等待诊断。
+`ci` 详细参数：`-t/--max-turns N` 显式轮数硬上限（**默认不设上限**：轮数由模型自主决定，直到 `<finish>` 或连续 8 轮无新进展判定停滞自动停机；`ask` 模式仍收缩 3 轮）；`--yes` 高风险操作自动放行（不带则逐项 y/n 人工确认）；`--debug` 输出回复等待诊断。
 
 无需启动器时也可从项目根运行（Windows npm 需用 npm.cmd）：
 
@@ -103,7 +103,7 @@ npx.cmd tsx scripts/smoke.ts                          # 本地冒烟测试（21 
 - 页面改版会导致选择器失效；用 `probe` 诊断后在 `config/backends.json` 的 `selectors` 覆盖即可，无需改代码。
 - DeepSeek 页面元素类名是哈希混淆的（如 `_5a8ac7a`），选择器只能基于 id/placeholder/文本定位。
 - 任务内**禁止嵌套调用 webai 自身**（协议禁令 + `WEBAI_AGENT_SESSION` 环境守卫，run_command 派生的孙进程同样被拦）。查看某任务完整成果用 `webai start -- show <ID> [--transcript]`。
-- `-t/--max-turns` 上限被钳制为 1~50，防止模型自行传入超大轮数。
+- **轮数交给模型自主决定**：默认不设轮数上限（交互与 `ci` 同），任务推进到 `<finish>` 即止；安全网是**停滞停机**——连续 8 轮既不执行新工具调用也不收尾（协议重试 / 重复提交 / 只发评论）才判定转为失败并保存，`/continue` 可接着跑；需要硬预算时仍可用 `-t/--turns` 显式设定。
 - tsx/esbuild 环境下 `page.evaluate` 传函数会被注入 `__name` 导致浏览器端 ReferenceError，需以字符串形式传 JS（适配器已遵循此模式）。
 - DeepSeek 的代码块会用"复制/下载"按钮渲染，`innerText` 提取会吞掉 ``` 围栏——因此协议使用 ⟦TOOLCALL⟧/⟦ARG…⟧ 这类不被 markdown 渲染器转换的 unicode 标记（U+27E6/27E7）。
 - 回复检测分两级：**首选网络通道**——CDP 旁听页面自身发出的 `POST /api/v0/chat/completion` SSE（PoW 挑战由页面原生计算，我们不构造/签名/重放任何请求，只是读取自己会话的响应），文本来自数据流、无渲染损伤，`response/status: FINISHED` 是确定性完成信号；**备用 DOM 通道**——消息计数（`ds-markdown` 数）+ 聊天区重组感知差分（前缀/包含/尾尾公共后缀三级）。

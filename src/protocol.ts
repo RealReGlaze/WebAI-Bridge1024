@@ -153,6 +153,7 @@ export function buildSystemMessage(goal: string, workspaceRoot: string, tools: T
     '- ask：一次性问答/查询/分析（1~3 个输入就能答完的任务；优先直接给结论，最多两小批调用）。',
     '- work：需要多轮创建/修改/构建/测试的实际执行任务。',
     '声明后按对应节律推进：ask 快进快出，work 稳步多轮。声明只需一次。',
+    '轮数由你自主决定：需要多少轮就进行多少轮，没有任何人为上限；但每一轮都必须实际推进（重复提交已执行的调用只会被停机）。完成时务必 <finish>。',
     '',
     '现在开始：先声明工作模式，然后了解任务与工作区（可用 list_files / read_file），再执行目标。',
   ].join('\n');
