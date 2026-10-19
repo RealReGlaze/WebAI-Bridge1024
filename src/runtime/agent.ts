@@ -127,9 +127,9 @@ export class AgentLoop {
     return {
       workspaceRoot: this.options.workspaceRoot,
       policy: this.policy,
-      confirm: async (title: string) => {
+      confirm: async (title: string, detail?: string) => {
         if (this.options.autoApprove) {
-          return this.approve(title);
+          return this.approve(title, detail);
         }
         const answer = await confirmPrompt(`[确认] ${title}? (y/N) `);
         return answer;
@@ -138,23 +138,23 @@ export class AgentLoop {
   }
 
   /** 自动放行：优先交由审批模型（Allow/Refuse），不可用或无审批模型时直接放行 */
-  private async approve(title: string): Promise<boolean> {
+  private async approve(title: string, detail?: string): Promise<boolean> {
     const ap = this.options.approver;
     if (!ap || this.approverUnavailable) {
-      console.log(`[agent] 自动放行${ap && this.approverUnavailable ? '（审批模型不可用，回退直接放行）' : '（无审批模型）'}：${title}`);
+      console.log(`[agent] 自动放行${ap && this.approverUnavailable ? '（审批模型不可用，回退直接放行）' : '（无审批模型）'}：${title.split('\n')[0]}`);
       return true;
     }
-    const verdict = await this.modelApproval(ap, title);
+    const verdict = await this.modelApproval(ap, title, detail);
     if (verdict === null) {
       this.approverUnavailable = true;
-      console.log(`[agent] 审批模型不可用：回退为直接放行（${title}）`);
+      console.log(`[agent] 审批模型不可用：回退为直接放行（${title.split('\n')[0]}）`);
       return true;
     }
     return verdict;
   }
 
-  /** 调用审批模型：发送任务背景+操作摘要，要求第一行 Allow/Refuse、第二行理由。遵守 /wait 节流。 */
-  private async modelApproval(ap: { adapter: IModelAdapter; label: string }, title: string): Promise<boolean | null> {
+  /** 调用审批模型：发送任务背景 + 操作摘要 + 操作原始内容，要求第一行 Allow/Refuse、第二行理由。遵守 /wait 节流。 */
+  private async modelApproval(ap: { adapter: IModelAdapter; label: string }, title: string, detail?: string): Promise<boolean | null> {
     // 节流遵循 /wait 设置（审批对话与任务轮次共用）
     if (this.options.pacingMs && this.options.pacingMs > 0) {
       await new Promise((r) => setTimeout(r, this.options.pacingMs));
@@ -165,13 +165,17 @@ export class AgentLoop {
     const recentText = recent.length
       ? recent.map((c) => `${c.name}${c.ok ? '✓' : '✗'}`).join('、')
       : '（本轮首批操作）';
+    const cut = (s: string, n: number) => (s.length > n ? `${s.slice(0, n)}\n…（已截断，原始长度 ${s.length} 字符）` : s);
     const msg = [
-      '你是本地 Agent 系统的安全审批员，下一行是执行方模型请求批准的操作。审批依据：操作是否违反本地安全规则（越出工作区、删除性破坏、不可逆系统变更、明显与任务无关），以及是否有正当理由。',
+      '你是本地 Agent 系统的安全审批员。执行方模型请求批准下列操作，操作的全部原始内容附在下方（文件补丁的 SEARCH/REPLACE 原文、完整命令行等），请依据内容本身做出判断。',
       '',
-      `【任务背景】${(this.options.goal ?? '').replace(/\s+/g, ' ').slice(0, 200)}`,
+      `【任务目标】${(this.options.goal ?? '').replace(/\s+/g, ' ').slice(0, 200)}`,
+      `【工作区（仅此目录允许改动）】${this.options.workspaceRoot}`,
       `【最近已执行】${recentText}`,
       `【本次待批操作】${title}`,
+      ...(detail ? [`【操作原始内容】\n${cut(detail, 1800)}`] : ['【无附加原始内容】']),
       '',
+      '审批依据：越出工作区之外、删除性/不可逆破坏（删除大量文件、git push/重置等）、危险系统变更、明显与任务目标无关的操作 → Refuse；与目标相干的正当改动一并给出理由。',
       '回复格式要求：第一行只写 Allow（允许）或 Refuse（拒绝）；第二行写一句理由（不超过 40 字）。不要输出其他内容。',
     ].join('\n');
     const sent = await ap.adapter.sendMessage(msg);
@@ -210,11 +214,16 @@ export class AgentLoop {
       }
       try {
         if (tool.confirmHint) {
-          const hint = tool.confirmHint(call.args);
+          const hint = tool.confirmHint(call.args, ctx);
           if (hint) {
-            const ok = await ctx.confirm(hint);
+            // 原始内容：单一长字符串参数直接用原文（补丁/命令行），否则给参数 JSON（供审批模型判断）
+            const stringParam = tool.params.find(
+              (p) => p.type === 'string' && typeof call.args[p.name] === 'string' && (call.args[p.name] as string).length > 0,
+            );
+            const detail = stringParam ? (call.args[stringParam.name] as string) : JSON.stringify(call.args, null, 1);
+            const ok = await ctx.confirm(hint, detail);
             if (!ok) {
-              results.push({ name: tool.name, result: { ok: false, output: '人工确认被拒绝：该写操作未执行。如需修改，请先说明理由再次提交。', rejected: true } });
+              results.push({ name: tool.name, result: { ok: false, output: '未获批准（人工或审批模型拒绝）：该写操作未执行。如需修改，请依据拒绝原因调整后再次提交。', rejected: true } });
               continue;
             }
           }

@@ -17,8 +17,8 @@ export interface ToolParam {
 export interface ToolContext {
   workspaceRoot: string;
   policy: AgentPolicy;
-  /** 高风险操作确认钩子（CLI 会转成人工 y/n） */
-  confirm: (title: string) => Promise<boolean>;
+  /** 高风险操作确认钩子（CLI 会转成人工 y/n 或审批模型 Allow/Refuse；detail=操作的原始内容，供审批模型判断） */
+  confirm: (title: string, detail?: string) => Promise<boolean>;
 }
 
 export interface ToolOutput {
@@ -32,8 +32,8 @@ export interface Tool {
   name: string;
   description: string;
   params: ToolParam[];
-  /** 返回 null 表示无需确认；返回 string 则作为确认提示 */
-  confirmHint?: (args: Record<string, unknown>) => string | null;
+  /** 返回 null 表示无需确认；返回 string 则作为确认提示（ctx 供命令白名单判断用） */
+  confirmHint?: (args: Record<string, unknown>, ctx: ToolContext) => string | null;
   execute(args: Record<string, unknown>, ctx: ToolContext): Promise<ToolOutput>;
 }
 
@@ -195,7 +195,18 @@ export const applyPatch: Tool = {
   params: [
     { name: 'patch', type: 'string', description: '上面描述格式的补丁全文（JSON 转义后的字符串）' },
   ],
-  confirmHint: () => '模型请求写入/修改文件',
+  /** 确认提示要足够具体：让操作者/审批模型能依据「实际改哪、改什么」做出判断 */
+  confirmHint: (args) => {
+    const raw = typeof args['patch'] === 'string' ? args['patch'] : '';
+    const m = PATCH_MARKER.exec(raw.trim());
+    if (!m || !m.groups) return '模型请求写入/修改文件（补丁格式异常，无法预览内容；执行时将被拒）';
+    const rel = m.groups['path']!.trim();
+    const search = m.groups['search']!.replace(/\r\n/g, '\n').replace(/^\n/, '').replace(/\n$/, '');
+    const replace = m.groups['replace']!.replace(/\r\n/g, '\n').replace(/^\n/, '').replace(/\n$/, '');
+    const cut = (s: string, n: number) => (s.length > n ? `${s.slice(0, n)}\n…（已截断，原 ${s.length} 字符）` : s);
+    if (!search.trim()) return `新建文件 ${rel}，完整内容为：\n${cut(replace, 500)}`;
+    return `修改文件 ${rel}：\n[SEARCH 现在]：\n${cut(search, 300)}\n[REPLACE 改为]：\n${cut(replace, 300)}`;
+  },
   execute(args, ctx) {
     const raw = str(args, 'patch');
     const m = PATCH_MARKER.exec(raw.trim());
@@ -248,6 +259,15 @@ export const applyPatch: Tool = {
 
 const FORBIDDEN_COMMAND_CHARS = /[;&|<>`]/;
 
+/** 命令是否需要审批：仅「在白名单内且标记 requireConfirm」的高风险前缀返回提示 */
+function highRiskCommandHint(cmd: string, ctx: ToolContext): string | null {
+  const c = cmd.trim();
+  if (!c || FORBIDDEN_COMMAND_CHARS.test(c)) return null; // 非法命令会被执行器拒绝，无需确认
+  const hit = ctx.policy.commandWhitelistPrefixes.find((p) => c.toLowerCase().startsWith(p.prefix.toLowerCase()));
+  if (!hit || !hit.requireConfirm) return null;
+  return `执行高风险命令（白名单 ${hit.prefix}）：${c}`;
+}
+
 function runCaptured(cmd: string, cwd: string, timeoutMs: number): Promise<{ code: number | null; stdout: string; stderr: string }> {
   return new Promise((resolve) => {
     const child = spawn(cmd, { cwd, shell: true, windowsHide: true });
@@ -277,6 +297,7 @@ export const runCommand: Tool = {
   name: 'run_command',
   description: '在任务工作区目录内执行命令（仅白名单前缀；install/commit 等会向你请求批准）。禁止管道/重定向/分号。',
   params: [{ name: 'command', type: 'string', description: '完整命令行，如 node test.js' }],
+  confirmHint: (args, ctx) => highRiskCommandHint(str(args, 'command', ''), ctx),
   execute(args, ctx) {
     const cmd = str(args, 'command').trim();
     if (FORBIDDEN_COMMAND_CHARS.test(cmd)) {
@@ -288,8 +309,8 @@ export const runCommand: Tool = {
     }
     return (async () => {
       if (hit.requireConfirm) {
-        const okGo = await ctx.confirm(`执行高风险命令：${cmd}`);
-        if (!okGo) return { ok: false, output: '人工确认被拒绝：命令未执行。', rejected: true } as ToolOutput;
+        const okGo = await ctx.confirm(`执行高风险命令：${cmd}`, cmd);
+        if (!okGo) return { ok: false, output: '确认被拒绝（人工或审批模型）：命令未执行。', rejected: true } as ToolOutput;
       }
       const { code, stdout, stderr } = await runCaptured(cmd, ctx.workspaceRoot, 180_000);
       const trim = (s: string, n: number) => (s.length > n ? s.slice(0, n) + `\n…(截断，原 ${s.length} 字符)` : s);
@@ -305,6 +326,7 @@ export const runBuild: Tool = {
   name: 'run_build',
   description: '执行构建命令（默认 "npm run build"，可传 command 覆盖）。',
   params: [{ name: 'command', type: 'string', description: '构建命令，默认 npm run build', required: false }],
+  confirmHint: (args, ctx) => highRiskCommandHint(str(args, 'command', 'npm run build'), ctx),
   execute(args, ctx) {
     const cmd = str(args, 'command', 'npm run build');
     return runCommand.execute({ command: cmd }, ctx);
@@ -315,6 +337,7 @@ export const runTests: Tool = {
   name: 'run_tests',
   description: '执行测试命令（默认 "npm test"，可传 command 覆盖，如 node test.js）。',
   params: [{ name: 'command', type: 'string', description: '测试命令，默认 npm test', required: false }],
+  confirmHint: (args, ctx) => highRiskCommandHint(str(args, 'command', 'npm test'), ctx),
   execute(args, ctx) {
     const cmd = str(args, 'command', 'npm test');
     return runCommand.execute({ command: cmd }, ctx);

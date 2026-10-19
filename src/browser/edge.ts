@@ -22,11 +22,27 @@ export interface EdgeLaunchOptions {
   startUrl: string;
 }
 
-/** 常见 Edge 安装位置 */
+/** 常见 Edge 安装位置（Windows/macOS/Linux），末尾附带同引擎 Chromium 系回退（CDP 协议一致） */
 const EDGE_CANDIDATES = [
+  // Windows
   'C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe',
   'C:\\Program Files\\Microsoft\\Edge\\Application\\msedge.exe',
-];
+  process.env['LOCALAPPDATA']
+    ? path.win32.join(process.env['LOCALAPPDATA'], 'Microsoft', 'Edge', 'Application', 'msedge.exe')
+    : '',
+  // macOS
+  '/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge',
+  // Linux（各发行版包名不同）
+  '/usr/bin/microsoft-edge',
+  '/usr/bin/microsoft-edge-stable',
+  '/usr/bin/microsoft-edge-beta',
+  // 回退：同引擎 Chromium 系
+  '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
+  '/usr/bin/google-chrome',
+  '/usr/bin/google-chrome-stable',
+  '/usr/bin/chromium',
+  '/usr/bin/chromium-browser',
+].filter(Boolean);
 
 export function detectEdgePath(explicit?: string): string {
   if (explicit && existsSync(explicit)) return explicit;
@@ -34,7 +50,7 @@ export function detectEdgePath(explicit?: string): string {
     if (existsSync(p)) return p;
   }
   throw new Error(
-    `未找到 Edge 可执行文件。可在 config/backends.json 中指定 browser.executablePath。已尝试：\n${EDGE_CANDIDATES.join('\n')}`,
+    `未找到 Edge/Chromium 可执行文件。可在 config/backends.json 中指定 browser.executablePath。已尝试：\n${EDGE_CANDIDATES.join('\n')}`,
   );
 }
 

@@ -7,7 +7,7 @@ import path from 'node:path';
 import { parseReply, buildToolResultMessage, buildRetryMessage, CANON_START, CANON_END } from '../src/protocol.js';
 import { DeepSeekWebAdapter } from '../src/adapters/DeepSeekWebAdapter.js';
 import { buildResumeMessage, type AgentRoundLog, type AgentSessionState } from '../src/runtime/agent.js';
-import { applyPatch, runCommand, defaultTools } from '../src/tools/index.js';
+import { applyPatch, runCommand, runTests, defaultTools } from '../src/tools/index.js';
 import { resolveSandboxPath, DEFAULT_POLICY } from '../src/tools/policy.js';
 import type { ToolContext } from '../src/tools/index.js';
 
@@ -302,6 +302,26 @@ function main() {
     c5.calls.length === 2 && c5.calls.some((x) => x.name === 'git_diff') && c5.calls.some((x) => x.name === 'list_files')
       ? pass('隐蔽标记与标准标记混合识别')
       : fail('隐蔽标记与标准标记混合识别', JSON.stringify(c5));
+
+    // 审批提示具体化：补丁预览含目标路径与改动原文
+    const hintPatch = applyPatch.confirmHint!(
+      { patch: 'path: src/a.ts\n=======\nconst a = 1;\n=======\nconst a = 2;\n=======' },
+      { workspaceRoot: '.', policy: { readDenyPrefixes: [], writeDenyPrefixes: [], commandWhitelistPrefixes: [] } as ToolContext['policy'] },
+    );
+    hintPatch!.includes('src/a.ts') && hintPatch!.includes('const a = 2;') && hintPatch!.includes('SEARCH')
+      ? pass('apply_patch 审批提示含具体内容')
+      : fail('apply_patch 审批提示含具体内容', String(hintPatch));
+
+    // 命令审批：白名单 requireConfirm 前缀 → 提示含完整命令行；非确认前缀 → null
+    const policyCommand = { commandWhitelistPrefixes: [{ prefix: 'npm install', requireConfirm: true }, { prefix: 'npm test', requireConfirm: false }] } as ToolContext['policy'];
+    const hintCmd = runCommand.confirmHint!({ command: 'npm install rimraf' }, { workspaceRoot: '.', policy: policyCommand } as ToolContext);
+    hintCmd === '执行高风险命令（白名单 npm install）：npm install rimraf'
+      ? pass('run_command 审批提示含完整命令行')
+      : fail('run_command 审批提示含完整命令行', String(hintCmd));
+    const hintTests = runTests.confirmHint!({}, { workspaceRoot: '.', policy: policyCommand } as ToolContext);
+    hintTests === null
+      ? pass('run_tests 默认命令不重复审批')
+      : fail('run_tests 默认命令不重复审批', String(hintTests));
 
     console.log(process.exitCode ? '\n存在失败用例。' : '\n全部通过。');
     process.exit(process.exitCode ?? 0);

@@ -1,0 +1,27 @@
+#!/usr/bin/env bash
+# WebAI Bridge launcher (macOS/Linux): run tsx src/index.ts from the project root, callable from any directory.
+# Example: webai ci "fix failing tests" -C /path/to/proj --yes
+# Mirrors bin/webai.cmd on Windows.
+set -u
+
+# Resolve this script's real location (follows symlinks, e.g. ~/.local/bin/webai -> <root>/bin/webai)
+SOURCE="${BASH_SOURCE[0]}"
+while [ -L "$SOURCE" ]; do
+  DIR="$(cd -P "$(dirname "$SOURCE")" && pwd)"
+  SOURCE="$(readlink "$SOURCE")"
+  case "$SOURCE" in
+    /*) ;;                                   # absolute link target
+    *) SOURCE="$DIR/$SOURCE" ;;              # relative link target
+  esac
+done
+ROOT="$(cd -P "$(dirname "$SOURCE")/.." && pwd)"
+
+# Capture the user's shell working directory BEFORE cd; CLI uses it as the default workspace
+export WEBAI_INVOKED_CWD="$PWD"
+
+cd "$ROOT"
+if [ ! -x "node_modules/.bin/tsx" ]; then
+  echo "[webai] node_modules not found. Run 'npm install' in $ROOT first (or re-run setup.sh)." >&2
+  exit 1
+fi
+exec node_modules/.bin/tsx src/index.ts "$@"
