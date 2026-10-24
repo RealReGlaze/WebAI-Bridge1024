@@ -2,7 +2,7 @@
   "name": "webai-bridge",
   "version": "0.1.0",
   "private": true,
-  "description": "Multi web-AI bridge + local harness runtime (Windows)",
+  "description": "Multi web-AI bridge + local harness runtime",
   "type": "module",
   "engines": { "node": ">=20" },
   "scripts": {

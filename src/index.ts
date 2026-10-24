@@ -2,7 +2,7 @@
 /**
  * WebAI Bridge CLI —— 第二/三阶段验证版。
  *
- * 用法（Windows，npm 需用 npm.cmd）：
+ * 用法（Windows 可用 npm.cmd，macOS/Linux 可用 npm）：
  *   npm.cmd start -- browser   启动专用 Edge 并附加（打开 DeepSeek，首次需手动登录）
  *   npm.cmd start -- status    显示后端连接状态与能力确认情况
  *   npm.cmd start -- probe     诊断当前页面结构与选择器命中情况（页面改版时用）
@@ -21,7 +21,7 @@ import { AgentLoop, clearQueuedLines, readLineOnce, summarizeSessionDigest, type
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const CONFIG_PATH = path.join(ROOT, 'config', 'backends.json');
 
-/** 用户打开命令行时的目录（webai.cmd 在 pushd 项目根前捕获并传入）。默认工作区以此为准。 */
+/** 启动命令时的工作目录（启动器切换到项目根前捕获）。默认工作区以此为准。 */
 const INVOKED_CWD =
   process.env['WEBAI_INVOKED_CWD'] && path.isAbsolute(process.env['WEBAI_INVOKED_CWD'])
     ? process.env['WEBAI_INVOKED_CWD']
@@ -458,7 +458,7 @@ async function main() {
   start -- list                 列出本地任务会话（.runtime/tasks）
   start -- show <ID> [--transcript]  查看某任务的轮次/总结/完整成果（嵌套被拦后成果不会失踪）
   交互模式命令：/model <name|list> · /deep-on|off（深度思考）· /wait <秒>（节流）· /ctx [clear]（前情摘要）· /tasks · /show · /auto on|off · /accept-all · /continue [ID] · /help · /exit
-启动器：项目 bin/webai.cmd（任意目录调用，如 webai.cmd ci "修复所有测试" -C E:\\proj）
+启动器：Windows 用 bin/webai.cmd，macOS/Linux 用 bin/webai（可从任意目录调用）
 可用 BACKEND_ID 环境变量或 --backend <后端> 指定后端 id；WEBAI_DEBUG=1 输出回复等待诊断。`);
     return;
   }

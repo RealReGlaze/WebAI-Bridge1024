@@ -11,12 +11,18 @@
     { "prefix": "npm.cmd run", "requireConfirm": false },
     { "prefix": "npm.cmd test", "requireConfirm": false },
     { "prefix": "npx.cmd tsc", "requireConfirm": false },
+    { "prefix": "npm run", "requireConfirm": false },
+    { "prefix": "npm test", "requireConfirm": false },
+    { "prefix": "npx tsc", "requireConfirm": false },
+    { "prefix": "npx tsx", "requireConfirm": false },
     { "prefix": "git status", "requireConfirm": false },
     { "prefix": "git diff", "requireConfirm": false },
     { "prefix": "git log", "requireConfirm": false },
     { "prefix": "python", "requireConfirm": true },
     { "prefix": "pip", "requireConfirm": true },
     { "prefix": "npm install", "requireConfirm": true },
+    { "prefix": "npm ci", "requireConfirm": true },
+    { "prefix": "npm.cmd install", "requireConfirm": true },
     { "prefix": "git commit", "requireConfirm": true },
     { "prefix": "git push", "requireConfirm": true }
   ]

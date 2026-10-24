@@ -32,6 +32,10 @@ const EDGE_CANDIDATES = [
     : '',
   // macOS
   '/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge',
+  '/Applications/Microsoft Edge Beta.app/Contents/MacOS/Microsoft Edge Beta',
+  '/Applications/Microsoft Edge Dev.app/Contents/MacOS/Microsoft Edge Dev',
+  '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
+  '/Applications/Chromium.app/Contents/MacOS/Chromium',
   // Linux（各发行版包名不同）
   '/usr/bin/microsoft-edge',
   '/usr/bin/microsoft-edge-stable',
