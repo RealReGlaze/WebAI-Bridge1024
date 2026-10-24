@@ -141,14 +141,9 @@ async function executeTask(
     approver?: { adapter: IModelAdapter; label: string };
   },
 ): Promise<{ ok: boolean; session: AgentSessionState | null }> {
-  const conn = await adapter.connect();
-  if (!conn.ok) {
-    console.error(`[ci] 连接失败：${conn.code} ${conn.message}`);
-    return { ok: false, session: null };
-  }
   if (params.autoApprove) {
     if (params.approver) console.log(`[审批] 执行方 ${params.backendName ?? adapter.backendId}；审批模型：${params.approver.label}（自动放行时逐次请求其 Allow/Refuse，遵守 /wait 节流）`);
-    else console.log('[审批] 无第二个可用后端作为审批模型：自动放行将直接生效。');
+    else console.log('[审批] 未配置可用的第二个后端：高风险操作将被拒绝。');
   }
   const loop = new AgentLoop(adapter, {
     goal: params.resumeSession ? params.resumeSession.goal : params.goal,
@@ -173,8 +168,13 @@ async function executeTask(
   );
   // 注入会话标识环境变量：run_command 派生的孙进程（含 webai 自身）将因 WEBAI_AGENT_SESSION 被拒
   process.env['WEBAI_AGENT_SESSION'] = loop.sessionId;
-  const done = await loop.run();
-  delete process.env['WEBAI_AGENT_SESSION'];
+  let done: AgentSessionState;
+  try {
+    done = await loop.run();
+  } finally {
+    delete process.env['WEBAI_AGENT_SESSION'];
+    await adapter.disconnect().catch(() => undefined);
+  }
   console.log(`[ci] 结束：${done.status}（${done.rounds.length} 轮）`);
   if (done.summary) console.log(`[ci] 总结：${done.summary}`);
   return { ok: done.status === 'finished', session: done };

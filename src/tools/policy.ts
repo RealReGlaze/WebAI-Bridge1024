@@ -5,7 +5,7 @@
  * - 模型不可修改桥接器自身与配置（deny 名单），也不可修改本策略文件。
  * - 策略文件只允许人工编辑；每次执行都从磁盘重新读取，模型虚假的"已修改策略"不生效。
  */
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, readFileSync, realpathSync } from 'node:fs';
 import path from 'node:path';
 
 export interface AgentPolicy {
@@ -21,7 +21,7 @@ export const DEFAULT_POLICY: AgentPolicy = {
   writeDenyPrefixes: ['.runtime/', 'config/', 'docs/', '../'],
   readDenyPrefixes: ['.runtime/sessions/', '.runtime/tasks/'],
   commandWhitelistPrefixes: [
-    { prefix: 'node', requireConfirm: false },
+    { prefix: 'node', requireConfirm: true },
     { prefix: 'npm run', requireConfirm: false },
     { prefix: 'npm test', requireConfirm: false },
     { prefix: 'npm.cmd run', requireConfirm: false },
@@ -30,10 +30,11 @@ export const DEFAULT_POLICY: AgentPolicy = {
     { prefix: 'git status', requireConfirm: false },
     { prefix: 'git diff', requireConfirm: false },
     { prefix: 'git log', requireConfirm: false },
-    { prefix: 'python', requireConfirm: false },
+    { prefix: 'python', requireConfirm: true },
     { prefix: 'pip', requireConfirm: true },
     { prefix: 'npm install', requireConfirm: true },
     { prefix: 'git commit', requireConfirm: true },
+    { prefix: 'git push', requireConfirm: true },
   ],
 };
 
@@ -69,6 +70,35 @@ export function resolveSandboxPath(baseDir: string, userPath: string): string {
   const rel = path.relative(baseResolved, absolute);
   if (rel.startsWith('..') || path.isAbsolute(rel)) {
     throw new Error(`路径越权：${userPath} 不在工作区 ${baseResolved} 内`);
+  }
+  // 词法路径检查无法阻止工作区内的 symlink/junction 指向外部目录。
+  // 对目标自身（或最近存在的祖先）做 realpath 校验；基目录尚不存在时（如沙箱首建），
+  // 也上溯到其最近存在的祖先再对比，仍能拦截通过已存在链接指向外部的越权。
+  {
+    let probe = absolute;
+    let probeBase = baseResolved;
+    while (!existsSync(probe)) {
+      const parent = path.dirname(probe);
+      if (parent === probe) break;
+      probe = parent;
+    }
+    while (!existsSync(probeBase)) {
+      const parent = path.dirname(probeBase);
+      if (parent === probeBase) break;
+      probeBase = parent;
+    }
+    let realBase: string;
+    let realProbe: string;
+    try {
+      realBase = realpathSync.native(probeBase);
+      realProbe = realpathSync.native(probe);
+    } catch {
+      throw new Error(`路径校验失败：无法确认 ${userPath} 的真实位置`);
+    }
+    const realRel = path.relative(realBase, realProbe);
+    if (realRel.startsWith('..') || path.isAbsolute(realRel)) {
+      throw new Error(`路径越权：${userPath} 通过链接指向工作区外`);
+    }
   }
   return absolute;
 }

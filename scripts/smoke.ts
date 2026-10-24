@@ -80,7 +80,7 @@ function main() {
 
     // 8. 命令：白名单内真实执行
     const v8 = await runCommand.execute({ command: 'node -e "console.log(42)"' }, ctx);
-    v8.ok && v8.output.includes('42') ? pass('命令白名单放行') : fail('命令白名单放行', v8.output);
+    !v8.ok && v8.output.includes('内联代码') ? pass('命令内联代码拦截') : fail('命令内联代码拦截', v8.output);
 
     // 9. 协议解析：正常块 + finish
     const sample = '我先创建文件。\n```toolcall\n{"name":"apply_patch","args":{"patch":"path: a.txt\\n=======\\n\\n=======\\nhi\\n======"}}\n```\n然后结束。\n<finish>完成创建</finish>';

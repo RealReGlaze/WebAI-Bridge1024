@@ -19,6 +19,8 @@ export interface ToolContext {
   policy: AgentPolicy;
   /** 高风险操作确认钩子（CLI 会转成人工 y/n 或审批模型 Allow/Refuse；detail=操作的原始内容，供审批模型判断） */
   confirm: (title: string, detail?: string) => Promise<boolean>;
+  /** AgentLoop 已完成统一确认时使用，避免同一操作重复询问。 */
+  skipConfirm?: boolean;
 }
 
 export interface ToolOutput {
@@ -230,7 +232,7 @@ export const applyPatch: Tool = {
     const content = created ? '' : readFileSync(abs, 'utf-8').replace(/\r\n/g, '\n');
     if (created) {
       if (search.trim() !== '') {
-        return Promise.resolve({ ok: false, output: '新建文件时 SEARCH 块必须为空字符串。', rejected: false });
+        return Promise.resolve({ ok: false, output: '新建文件时 SEARCH 块须为空字符串。', rejected: false });
       }
       mkdirSync(path.dirname(abs), { recursive: true });
       writeFileSync(abs, replace.startsWith('\n') ? replace.slice(1) : replace, 'utf-8');
@@ -246,7 +248,7 @@ export const applyPatch: Tool = {
     if (!content.includes(searchT)) {
       return Promise.resolve({
         ok: false,
-        output: '补丁失败：SEARCH 块与文件现有内容不完全一致。请先 read_file 获取精确内容（含空格与换行、行首行号请去掉），再重试。',
+        output: '补丁失败，SEARCH 块与文件现有内容不完全一致。请先 read_file 获取精确内容（含空格与换行、行首行号请去掉），再重试。',
         rejected: false,
       });
     }
@@ -259,13 +261,23 @@ export const applyPatch: Tool = {
 
 const FORBIDDEN_COMMAND_CHARS = /[;&|<>`]/;
 
-/** 命令是否需要审批：仅「在白名单内且标记 requireConfirm」的高风险前缀返回提示 */
+/** 命令是否需要审批：仅在白名单内且标记 requireConfirm的高风险前缀返回提示 */
 function highRiskCommandHint(cmd: string, ctx: ToolContext): string | null {
   const c = cmd.trim();
   if (!c || FORBIDDEN_COMMAND_CHARS.test(c)) return null; // 非法命令会被执行器拒绝，无需确认
-  const hit = ctx.policy.commandWhitelistPrefixes.find((p) => c.toLowerCase().startsWith(p.prefix.toLowerCase()));
+  const hit = ctx.policy.commandWhitelistPrefixes.find((p) => commandMatchesPrefix(c, p.prefix));
   if (!hit || !hit.requireConfirm) return null;
   return `执行高风险命令（白名单 ${hit.prefix}）：${c}`;
+}
+
+function commandMatchesPrefix(command: string, prefix: string): boolean {
+  const c = command.toLowerCase();
+  const p = prefix.trim().toLowerCase();
+  return c === p || c.startsWith(`${p} `);
+}
+
+function containsInlineInterpreterCode(command: string): boolean {
+  return /^(?:node(?:\.exe)?|python(?:\.exe)?|python3(?:\.exe)?)(?:\s+)(?:-e|--eval|-c|--command)(?:\s|$)/i.test(command.trim());
 }
 
 function runCaptured(cmd: string, cwd: string, timeoutMs: number): Promise<{ code: number | null; stdout: string; stderr: string }> {
@@ -303,12 +315,15 @@ export const runCommand: Tool = {
     if (FORBIDDEN_COMMAND_CHARS.test(cmd)) {
       return Promise.resolve({ ok: false, output: '拒绝：命令包含禁止字符（; & | < > `）。请拆成多条命令分别执行。', rejected: true });
     }
-    const hit = ctx.policy.commandWhitelistPrefixes.find((p) => cmd.toLowerCase().startsWith(p.prefix.toLowerCase()));
+    if (containsInlineInterpreterCode(cmd)) {
+      return Promise.resolve({ ok: false, output: '拒绝：不允许通过 node/python 直接执行内联代码，请改用工作区内文件。', rejected: true });
+    }
+    const hit = ctx.policy.commandWhitelistPrefixes.find((p) => commandMatchesPrefix(cmd, p.prefix));
     if (!hit) {
       return Promise.resolve({ ok: false, output: `拒绝：命令前缀不在白名单。可用前缀：${ctx.policy.commandWhitelistPrefixes.map((p) => p.prefix).join('，')}`, rejected: true });
     }
     return (async () => {
-      if (hit.requireConfirm) {
+      if (hit.requireConfirm && !ctx.skipConfirm) {
         const okGo = await ctx.confirm(`执行高风险命令：${cmd}`, cmd);
         if (!okGo) return { ok: false, output: '确认被拒绝（人工或审批模型）：命令未执行。', rejected: true } as ToolOutput;
       }

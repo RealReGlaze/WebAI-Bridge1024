@@ -1,5 +1,5 @@
 {
-  "// 说明": "仅存配置，绝不含账号密码/Cookie/令牌。登录态由 Edge 专用 profile（.runtime/ 目录）承载。",
+  "// 说明": "仅存配置，不含账号密码/Cookie/令牌。登录态由 Edge 专用 profile（.runtime/ 目录）承载。",
   "defaults": {
     "waitForResponse": {
       "totalTimeoutMs": 600000,
@@ -52,7 +52,7 @@
         "profileDir": ".runtime/edge-profile-qianwen"
       },
       "enabled": false,
-      "notes": "适配器第四阶段实现，暂未启用"
+      "notes": "暂未启用"
     }
   ]
 }

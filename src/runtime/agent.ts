@@ -7,7 +7,7 @@
  *
  * 每轮任务状态持久化到 .runtime/tasks/<sessionId>.json，供恢复与跨模型交接。
  */
-import { mkdirSync, writeFileSync } from 'node:fs';
+import { mkdirSync, renameSync, writeFileSync } from 'node:fs';
 import { createInterface } from 'node:readline';
 import path from 'node:path';
 import { IModelAdapter, type WaitForResponseOptions, type WebConversationState, type ChatTurn } from '../adapters/IModelAdapter.js';
@@ -115,7 +115,10 @@ export class AgentLoop {
     mkdirSync(dir, { recursive: true });
     this.session.updatedAt = Date.now();
     this.session.executedKeys = [...this.executedKeys];
-    writeFileSync(path.join(dir, `${this.session.sessionId}.json`), JSON.stringify(this.session, null, 2), 'utf-8');
+    const target = path.join(dir, `${this.session.sessionId}.json`);
+    const temp = `${target}.${process.pid}.${Date.now()}.tmp`;
+    writeFileSync(temp, JSON.stringify(this.session, null, 2), 'utf-8');
+    renameSync(temp, target);
   }
 
   /** 审批模型是否不可用（连接失败等，回退为直接放行；进程内记忆避免反复重试） */
@@ -129,6 +132,7 @@ export class AgentLoop {
     return {
       workspaceRoot: this.options.workspaceRoot,
       policy: this.policy,
+      skipConfirm: true,
       confirm: async (title: string, detail?: string) => {
         if (this.options.autoApprove) {
           return this.approve(title, detail);
@@ -139,18 +143,18 @@ export class AgentLoop {
     };
   }
 
-  /** 自动放行：优先交由审批模型（Allow/Refuse），不可用或无审批模型时直接放行 */
+  /** 自动放行：优先交由审批模型；审批模型不可用时拒绝高风险操作。 */
   private async approve(title: string, detail?: string): Promise<boolean> {
     const ap = this.options.approver;
     if (!ap || this.approverUnavailable) {
-      console.log(`[agent] 自动放行${ap && this.approverUnavailable ? '（审批模型不可用，回退直接放行）' : '（无审批模型）'}：${title.split('\n')[0]}`);
-      return true;
+      console.log(`[agent] 自动审批不可用，拒绝高风险操作：${title.split('\n')[0]}`);
+      return false;
     }
     const verdict = await this.modelApproval(ap, title, detail);
     if (verdict === null) {
       this.approverUnavailable = true;
-      console.log(`[agent] 审批模型不可用：回退为直接放行（${title.split('\n')[0]}）`);
-      return true;
+      console.log(`[agent] 审批模型不可用：拒绝高风险操作（${title.split('\n')[0]}）`);
+      return false;
     }
     return verdict;
   }
@@ -271,7 +275,13 @@ export class AgentLoop {
       if (!toggled) console.log(`[agent] 后端 ${this.adapter.backendId} 未提供深度思考开关（跳过）。`);
     }
     // 每次运行都从新网页会话开始（续跑的新上下文由第一条消息重建，避免残留干扰）
-    await this.adapter.startNewConversation();
+    const fresh = await this.adapter.startNewConversation();
+    if (!fresh.ok) {
+      this.session.status = 'failed';
+      this.session.summary = `新建会话失败：${fresh.code} ${fresh.message}`;
+      this.saveSession();
+      return this.session;
+    }
 
     const systemMsg = buildSystemMessage(options.goal, options.workspaceRoot);
     let message = resumed ? buildResumeMessage(this.session, this.adapter.backendId) : systemMsg;

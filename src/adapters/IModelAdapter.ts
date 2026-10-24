@@ -13,6 +13,7 @@ export interface BackendConfig {
   startUrl: string;
   /** 适配器类型名，决定运行时加载哪个适配器实现 */
   adapterType: 'deepseek-web' | 'mimo-web' | 'qianwen-web' | 'generic-web';
+  enabled?: boolean;
   /** 浏览器会话配置 */
   browser: {
     /** CDP 远程调试端口 */
@@ -24,6 +25,7 @@ export interface BackendConfig {
   };
   /** 选择器覆盖（可选）。各适配器有默认值；页面改版时可在此覆盖而无需改代码 */
   selectors?: Record<string, string>;
+  capabilities?: BackendCapabilities;
   /** 用途说明/已知限制 */
   notes?: string;
 }
