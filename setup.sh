@@ -12,6 +12,22 @@ echo "  Install directory: $ROOT"
 echo "============================================================"
 echo
 
+# 安装脚本必须位于解压后的项目根目录（与 package.json 同级）。
+# 若出现「npm 在临时目录里找不到 package.json」的报错，多半是在压缩包内直接运行、
+# 或从解压目录之外调用了本脚本 —— 先给出明确提示，而不是让 npm 抛 ENOLOCAL。
+if [ ! -f "$ROOT/package.json" ]; then
+  echo "  [ERROR] package.json not found in: $ROOT"
+  echo
+  echo "  This setup script must live in the root of the extracted project"
+  echo "  (next to package.json, src/, config/, ...). It looks like you are"
+  echo "  running it from inside the .zip archive, or from the wrong folder."
+  echo
+  echo "  Fix: extract the whole archive first, then run setup from that folder:"
+  echo "    cd /path/to/webai-bridge-*"
+  echo "    bash setup.sh"
+  exit 1
+fi
+
 have() { command -v "$1" >/dev/null 2>&1; }
 
 node_major() { node -p "process.versions.node.split('.')[0]" 2>/dev/null || echo ""; }

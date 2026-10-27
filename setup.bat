@@ -23,6 +23,12 @@ echo   Install directory: %ROOT%
 echo ============================================================
 echo.
 
+rem Guard: setup must sit next to package.json in the extracted project root.
+rem Running it from inside the .zip (Explorer preview), or copying only the
+rem .bat/.sh files out, makes npm fail later with "Could not read package.json".
+if not exist "%ROOT%\package.json" goto root_missing
+
+rem ---------- [1/4] Node.js ----------
 rem ---------- [1/4] Node.js ----------
 echo [1/4] Checking Node.js...
 set "NODE_MAJOR="
@@ -30,6 +36,19 @@ for /f "delims=" %%i in ('node -p "process.versions.node.split('.')[0]" 2^>nul')
 if not defined NODE_MAJOR goto node_missing
 if %NODE_MAJOR% LSS 20 goto node_missing
 goto node_ok
+
+:root_missing
+echo.
+echo   [ERROR] package.json not found in:
+echo     %ROOT%
+echo.
+echo   setup.bat must be in the root of the EXTRACTED project
+echo   (the same folder as package.json, src, config, ...).
+echo.
+echo   It looks like the script is being run from inside the .zip archive,
+echo   or only some files were copied out. Right-click the downloaded zip,
+echo   choose "Extract All", then run setup.bat from the extracted folder.
+goto fail
 
 :node_missing
 echo       Node.js 20+ not found. Trying automatic install via winget...
